@@ -16,6 +16,7 @@ Gerado em 2026-02-14T02:10:35.735070Z
 from __future__ import annotations
 
 import random
+import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 
 
@@ -675,46 +676,67 @@ def _range_contains(r: Tuple[int, int], x: int) -> bool:
 
 
 def _sample_stack_from_table(
-    rng: random.Random,
+    rng,
     table: List[Dict[str, Any]],
     blind_key: str,
     total_chips: int,
 ) -> int:
-    """
-    Amostra UM stack (marginal) para um jogador, usando a tabela completa e o blind_key.
+    """Amostra UM stack (marginal) para um jogador, usando a tabela completa e o blind_key.
+
+    Requisitos importantes:
+    - determinismo/resume: o RNG deve ser restaurável via checkpoint (preferencialmente numpy Generator)
+    - a linha OUTROS preserva massa de probabilidade, sem inventar intervalos
     """
     weights: List[float] = []
     ranges: List[Optional[Tuple[int, int]]] = []
 
     for row in table:
-        pct = float(row["pct"].get(blind_key, 0.0))
-        weights.append(max(0.0, pct))
-        if row["range"] == "OUTROS":
+        pct = float(row.get('pct', {}).get(blind_key, 0.0) or 0.0)
+        weights.append(pct)
+
+        rr = row.get('range', None)
+        if rr is None:
             ranges.append(None)
         else:
-            lo, hi = int(row["range"][0]), int(row["range"][1])
+            lo, hi = int(rr[0]), int(rr[1])
             ranges.append((lo, hi))
 
     probs = _normalize(weights)
-    idx = rng.choices(range(len(probs)), weights=probs, k=1)[0]
+
+    # rng.choice (numpy Generator) is preferred; fallback keeps compatibility.
+    try:
+        idx = int(rng.choice(len(probs), p=probs))
+    except Exception:
+        # random.Random fallback
+        idx = int(rng.choices(range(len(probs)), weights=probs, k=1)[0])
+
     r = ranges[idx]
 
     if r is not None:
         lo, hi = r
         if lo == hi:
             return lo
-        return rng.randint(lo, hi)
+        try:
+            # numpy Generator: high is exclusive
+            return int(rng.integers(lo, hi + 1))
+        except Exception:
+            return int(rng.randint(lo, hi))
 
-    # OUTROS, amostra um valor fora de TODOS os intervalos explícitos
+    # OUTROS: amostra um valor fora de TODOS os intervalos explícitos
     explicit = [rr for rr in ranges if rr is not None]
-    # Evita loop infinito, OUTROS é pequeno, 50 tentativas bastam
     for _ in range(50):
-        x = rng.randint(0, total_chips)
+        try:
+            x = int(rng.integers(0, total_chips + 1))
+        except Exception:
+            x = int(rng.randint(0, total_chips))
         if all(not _range_contains(rr, x) for rr in explicit):
             return x
 
     # fallback, se algo muito estranho acontecer
-    return rng.randint(0, total_chips)
+    try:
+        return int(rng.integers(0, total_chips + 1))
+    except Exception:
+        return int(rng.randint(0, total_chips))
 
 
 class ScenarioSampler:
@@ -728,7 +750,10 @@ class ScenarioSampler:
 
     def __init__(self, config: Dict[str, Any], seed: int = 0):
         self.config = dict(config) if config is not None else {}
-        self.rng = random.Random(seed)
+
+        # RNG: use numpy Generator to enable robust checkpoint/restore via bit_generator.state.
+        # (trainer.py also has a fallback for random.Random checkpoints.)
+        self.rng = np.random.default_rng(int(seed))
 
         # total fixo, Spin & Go 500 cada, 3 jogadores
         self.total_chips: int = int(self.config.get("force_total_chips", 1500))
@@ -750,6 +775,10 @@ class ScenarioSampler:
         if len(self.blind_weights_hu) != len(self.blind_levels):
             self.blind_weights_hu = [1.0] * len(self.blind_levels)
 
+            # Precompute normalized probabilities (float64) for fast sampling
+            self._blind_probs_3p = np.asarray(_normalize(self.blind_weights_3p), dtype=np.float64)
+            self._blind_probs_hu = np.asarray(_normalize(self.blind_weights_hu), dtype=np.float64)
+
         # Precomputa map blind -> key string "sb/bb"
         self._blind_key = {(sb, bb): f"{sb}/{bb}" for sb, bb in self.blind_levels}
 
@@ -758,8 +787,9 @@ class ScenarioSampler:
         self._fallback_3p_blind = "60/120"
 
     def _sample_blinds(self, is_hu: bool) -> Tuple[int, int]:
-        weights = self.blind_weights_hu if is_hu else self.blind_weights_3p
-        sb, bb = self.rng.choices(self.blind_levels, weights=weights, k=1)[0]
+        probs = self._blind_probs_hu if is_hu else self._blind_probs_3p
+        idx = int(self.rng.choice(len(self.blind_levels), p=probs))
+        sb, bb = self.blind_levels[idx]
         return int(sb), int(bb)
 
     def _sample_stacks_hu(self, blind_key: str) -> List[int]:
@@ -770,10 +800,12 @@ class ScenarioSampler:
                 b = self.total_chips - a
                 if b > 0:
                     stacks = [a, b, 0]
-                    self.rng.shuffle(stacks[:2])  # troca posição dos 2 vivos
+                    # BUGFIX: não usar slice, pois cria cópia e não embaralha in-place.
+                    if float(self.rng.random()) < 0.5:
+                        stacks[0], stacks[1] = stacks[1], stacks[0]
                     return stacks
         # fallback
-        a = self.rng.randint(1, self.total_chips - 1)
+        a = int(self.rng.integers(1, self.total_chips))
         return [a, self.total_chips - a, 0]
 
     def _sample_stacks_3p(self, blind_key: str) -> List[int]:
@@ -813,15 +845,17 @@ class ScenarioSampler:
                         scaled[i] = 1
 
             if sum(scaled) == self.total_chips and min(scaled) > 0:
-                self.rng.shuffle(scaled)
+                perm = self.rng.permutation(3)
+                scaled = [scaled[int(i)] for i in perm]
                 return scaled
 
         # fallback bem seguro
-        a = self.rng.randint(1, self.total_chips - 2)
-        b = self.rng.randint(1, self.total_chips - 1 - a)
+        a = int(self.rng.integers(1, self.total_chips - 1))
+        b = int(self.rng.integers(1, self.total_chips - a))
         c = self.total_chips - a - b
         out = [a, b, c]
-        self.rng.shuffle(out)
+        perm = self.rng.permutation(3)
+        out = [out[int(i)] for i in perm]
         return out
 
     def sample(self) -> Dict[str, Any]:

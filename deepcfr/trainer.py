@@ -352,9 +352,78 @@ class DeepCFRTrainer:
             "rng_np": self.rng.bit_generator.state,
             "rng_py": random.getstate(),
             "rng_torch": torch.get_rng_state(),
-            "scenario_rng": getattr(getattr(self.scenario_sampler, "rng", None), "bit_generator", None).state
-                if getattr(self.scenario_sampler, "rng", None) is not None else None,
-            "adv_nets": [n.state_dict() for n in self.adv_nets],
+            # Scenario RNG (robust): supports numpy Generator (preferred) and python random.Random (fallback)
+
+            "scenario_rng_kind": (
+
+                "numpy" if (
+
+                    getattr(self.scenario_sampler, "rng", None) is not None
+
+                    and getattr(getattr(self.scenario_sampler, "rng", None), "bit_generator", None) is not None
+
+                    and getattr(getattr(getattr(self.scenario_sampler, "rng", None), "bit_generator", None), "state", None) is not None
+
+                ) else (
+
+                    "python_random" if (
+
+                        getattr(self.scenario_sampler, "rng", None) is not None
+
+                        and callable(getattr(getattr(self.scenario_sampler, "rng", None), "getstate", None))
+
+                    ) else None
+
+                )
+
+            ),
+
+            "scenario_rng_state": (
+
+                getattr(getattr(getattr(self.scenario_sampler, "rng", None), "bit_generator", None), "state", None)
+
+                if (
+
+                    getattr(self.scenario_sampler, "rng", None) is not None
+
+                    and getattr(getattr(self.scenario_sampler, "rng", None), "bit_generator", None) is not None
+
+                    and getattr(getattr(getattr(self.scenario_sampler, "rng", None), "bit_generator", None), "state", None) is not None
+
+                ) else (
+
+                    getattr(self.scenario_sampler.rng, "getstate")()
+
+                    if (
+
+                        getattr(self.scenario_sampler, "rng", None) is not None
+
+                        and callable(getattr(getattr(self.scenario_sampler, "rng", None), "getstate", None))
+
+                    ) else None
+
+                )
+
+            ),
+
+            # Legacy key: keep numpy state here for backward compatibility with older restores
+
+            "scenario_rng": (
+
+                getattr(getattr(getattr(self.scenario_sampler, "rng", None), "bit_generator", None), "state", None)
+
+                if (
+
+                    getattr(self.scenario_sampler, "rng", None) is not None
+
+                    and getattr(getattr(self.scenario_sampler, "rng", None), "bit_generator", None) is not None
+
+                    and getattr(getattr(getattr(self.scenario_sampler, "rng", None), "bit_generator", None), "state", None) is not None
+
+                ) else None
+
+            ),
+"adv_nets": [n.state_dict() for n in self.adv_nets],
             "pol_nets": [n.state_dict() for n in self.pol_nets],
             "adv_opts": [o.state_dict() for o in self.adv_opts],
             "pol_opts": [o.state_dict() for o in self.pol_opts],
@@ -373,11 +442,60 @@ class DeepCFRTrainer:
         if ckpt.get("rng_torch") is not None:
             torch.set_rng_state(ckpt["rng_torch"])
 
+        # Scenario RNG restore (robust + backward compatible)
+
+
         try:
-            sr = ckpt.get("scenario_rng", None)
-            if sr is not None and getattr(self.scenario_sampler, "rng", None) is not None:
-                self.scenario_sampler.rng.bit_generator.state = sr
+
+
+            sr_kind = ckpt.get("scenario_rng_kind", None)
+
+
+            sr_state = ckpt.get("scenario_rng_state", None)
+
+
+        
+
+
+            # Legacy checkpoints may only have "scenario_rng" (numpy bit_generator.state dict)
+
+
+            if sr_kind is None and sr_state is None and ckpt.get("scenario_rng", None) is not None:
+
+
+                sr_kind = "numpy"
+
+
+                sr_state = ckpt.get("scenario_rng")
+
+
+        
+
+
+            if sr_kind == "numpy" and sr_state is not None and getattr(self.scenario_sampler, "rng", None) is not None:
+
+
+                bg = getattr(self.scenario_sampler.rng, "bit_generator", None)
+
+
+                if bg is not None:
+
+
+                    bg.state = sr_state
+
+
+            elif sr_kind == "python_random" and sr_state is not None and getattr(self.scenario_sampler, "rng", None) is not None:
+
+
+                if callable(getattr(self.scenario_sampler.rng, "setstate", None)):
+
+
+                    self.scenario_sampler.rng.setstate(sr_state)
+
+
         except Exception:
+
+
             pass
 
         for n, sd in zip(self.adv_nets, ckpt.get("adv_nets", [])):
