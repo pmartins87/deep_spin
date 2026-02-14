@@ -318,6 +318,19 @@ def main() -> None:
         from deepcfr.buffers import ReservoirBuffer, ReservoirConfig
         from deepcfr.networks import AdvantageNet, PolicyNet
         from deepcfr.scenario import ScenarioSampler, choose_dealer_id_for_episode
+import deepcfr.scenario as scenario_mod
+import hashlib
+import pathlib as _pathlib
+
+# Audit: garante que o arquivo scenario.py importado é o correto (evita versão simplificada/errada)
+try:
+    _scenario_path = _pathlib.Path(scenario_mod.__file__).resolve()
+    _scenario_sha = hashlib.sha256(_scenario_path.read_bytes()).hexdigest()
+    logger.info(f'deepcfr.scenario file: {_scenario_path}')
+    logger.info(f'deepcfr.scenario sha256: {_scenario_sha}')
+except Exception as _e:
+    logger.warning(f'Não consegui calcular hash do scenario.py: {_e}')
+
         from deepcfr.trainer import DeepCFRTrainer
         from deepcfr.rollout_workers import init_worker, run_adv_task, run_pol_task, AdvTask, PolTask
 
