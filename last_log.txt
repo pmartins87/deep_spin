@@ -1,0 +1,44 @@
+C:\PokerAI\spin_deepcfr>venv\Scripts\python.exe -u scripts\train_deepcfr.py --workers 24 --worker_threads 1 --main_threads 12 --traversals 16384 --episodes 8192 --deterministic_merge 1 --bitwise 0
+[INFO] CLONE ENABLED (PokerGame.clone detected) [main]
+OBS_DIM detectado: 338
+Python: C:\PokerAI\spin_deepcfr\venv\Scripts\python.exe
+cpoker: C:\PokerAI\spin_deepcfr\env\cpoker.cp314-win_amd64.pyd
+workers=24, worker_threads=1, main_threads=12, deterministic_merge=1, bitwise=0
+Training started. CTRL+C salva e sai limpo.
+iter=1 dt_iter=76.6s elapsed=1.3m ADV: collect=71.8s (2000 sps) train=1.1s bs=15488 POL: collect=3.6s (6883 sps) train=0.1s bs=5550 adv_added=[84497, 43637, 15488] pol_added=[9556, 9439, 5550] adv_loss=[139.883, 86.8002, 71.5918] pol_loss=0.3522
+actions p0: F=0.0% C=31.1% 33=0.3% 50=0.0% 75=2.1% 100=0.0% AI=66.5% | p1: F=0.0% C=23.7% 33=0.0% 50=0.2% 75=1.7% 100=0.0% AI=74.4% | p2: F=7.2% C=33.3% 33=2.1% 50=0.0% 75=0.1% 100=0.0% AI=57.3%
+iter=5 dt_iter=125.6s elapsed=8.7m ADV: collect=119.6s (2225 sps) train=1.7s bs=16384 POL: collect=3.8s (6875 sps) train=0.5s bs=16384 adv_added=[110919, 131491, 23699] pol_added=[9901, 10632, 5703] adv_loss=[130.99, 140.9471, 124.9774] pol_loss=0.2374
+actions p0: F=0.0% C=24.1% 33=3.8% 50=0.1% 75=4.4% 100=0.3% AI=67.3% | p1: F=0.0% C=29.1% 33=0.0% 50=0.4% 75=1.0% 100=0.3% AI=69.1% | p2: F=0.0% C=37.1% 33=0.9% 50=0.0% 75=0.5% 100=0.0% AI=61.5%
+iter=10 dt_iter=161.2s elapsed=22.1m ADV: collect=155.1s (2490 sps) train=1.7s bs=16384 POL: collect=3.9s (6539 sps) train=0.5s bs=16384 adv_added=[73636, 246902, 65650] pol_added=[9262, 10313, 6158] adv_loss=[123.8209, 148.2427, 139.3194] pol_loss=0.2109
+actions p0: F=0.0% C=11.7% 33=14.9% 50=2.1% 75=2.4% 100=0.0% AI=68.9% | p1: F=0.2% C=0.2% 33=11.7% 50=5.5% 75=0.0% 100=0.0% AI=82.3% | p2: F=0.0% C=30.5% 33=0.0% 50=0.0% 75=0.0% 100=0.0% AI=69.5%
+iter=15 dt_iter=1189.0s elapsed=98.3m ADV: collect=1181.6s (1194 sps) train=1.2s bs=16384 POL: collect=5.9s (6979 sps) train=0.3s bs=16384 adv_added=[1149604, 182451, 78143] pol_added=[12102, 17420, 11487] adv_loss=[131.5151, 161.8027, 169.5988] pol_loss=0.2655
+actions p0: F=0.0% C=24.4% 33=1.3% 50=0.1% 75=2.3% 100=2.1% AI=69.7% | p1: F=0.1% C=97.7% 33=0.0% 50=0.0% 75=0.0% 100=0.0% AI=2.2% | p2: F=3.3% C=89.3% 33=0.6% 50=0.0% 75=3.0% 100=0.1% AI=3.6%
+iter=20 dt_iter=72.0s elapsed=126.0m ADV: collect=66.8s (1985 sps) train=1.2s bs=16384 POL: collect=3.6s (6908 sps) train=0.3s bs=16384 adv_added=[51470, 62616, 18514] pol_added=[9261, 10379, 5459] adv_loss=[129.2324, 154.8368, 174.8611] pol_loss=0.2589
+actions p0: F=0.0% C=16.9% 33=2.0% 50=0.0% 75=1.6% 100=0.0% AI=79.5% | p1: F=0.0% C=31.8% 33=0.0% 50=1.4% 75=0.0% 100=0.1% AI=66.7% | p2: F=13.3% C=30.3% 33=0.7% 50=0.0% 75=0.6% 100=0.0% AI=55.1%
+iter=25 dt_iter=231.0s elapsed=141.5m ADV: collect=225.9s (2346 sps) train=1.2s bs=16384 POL: collect=3.6s (6871 sps) train=0.3s bs=16384 adv_added=[452668, 48068, 29257] pol_added=[8860, 10441, 5222] adv_loss=[130.5488, 152.3075, 172.9135] pol_loss=0.2379
+actions p0: F=0.0% C=6.1% 33=2.3% 50=0.0% 75=1.4% 100=0.0% AI=90.3% | p1: F=0.1% C=55.7% 33=0.0% 50=1.6% 75=0.0% 100=0.0% AI=42.5% | p2: F=0.0% C=20.6% 33=3.1% 50=0.0% 75=0.0% 100=0.0% AI=76.2%
+[INFO] Salvando checkpoint + buffers...
+
+Parando, salvando checkpoint + buffers...
+[WARN] Falha ao salvar checkpoint/buffers: 'NoneType' object has no attribute 'state'
+
+[ERRO] O script terminou com exceção:
+AttributeError: 'NoneType' object has no attribute 'state'
+
+Traceback completo:
+
+Traceback (most recent call last):
+  File "C:\PokerAI\spin_deepcfr\scripts\train_deepcfr.py", line 579, in <module>
+    main()
+    ~~~~^^
+  File "C:\PokerAI\spin_deepcfr\scripts\train_deepcfr.py", line 561, in main
+    save_all(trainer, cfg)
+    ~~~~~~~~^^^^^^^^^^^^^^
+  File "C:\PokerAI\spin_deepcfr\scripts\train_deepcfr.py", line 167, in save_all
+    trainer.checkpoint(str(cfg.ckpt_path))
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "C:\PokerAI\spin_deepcfr\deepcfr\trainer.py", line 355, in checkpoint
+    "scenario_rng": getattr(getattr(self.scenario_sampler, "rng", None), "bit_generator", None).state
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'state'
+Pressione qualquer tecla para continuar. . .
