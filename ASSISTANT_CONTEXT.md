@@ -269,12 +269,29 @@ Checks:
 ---
 
 ## 6) Problemas/atenções atuais (para não esquecer)
-	1) viés forte para fold, vide last_log.txt
-	2) Quando “todo mundo está all-in”, advance_stage_if_needed() força stage_ = SHOWDOWN e finaliza, mas não completa as 5 cartas comunitárias.
-	3) O showdown então avalia a mão com board incompleto, e o seu eval7_best() não faz equity de runout, ele só avalia o “melhor 5-card possível com as cartas que existem agora”. Isso destrói o EV real de all-in, draws, blefes e raises, e frequentemente empurra a política para “não colocar ficha”, ou seja, fold/call passivo.
-	4) As ações de raise/bet por fração do pote são tratadas de um jeito que tende a ficar incoerente quando existe diff > 0 (aposta a pagar). Se raise não inclui corretamente o call embutido, ou se o legal action não checa diff + raise_add, isso bagunça custo real das ações e também empurra para fold.
-	5) fold alto quando to_call == 0 (ninguém deveria foldar de graça, nunca!)
-	6) desaparecimento quase total de bets/raises ao longo das iterações.
+1) Viés forte para fold (histórico: vide last_log.txt). **Atenção:** antes de culpar o CFR, sempre rode o `scripts/sanity_check.py` e confirme que o motor está “poker-correto”.
+
+2) ✅ **Corrigido (2026-02-14): ALL-IN multiway agora faz runout completo até 5 cartas**.
+   - O `advance_stage_if_needed()` tinha um early-return quando `!any_can_act`, encerrando a mão sem dealar flop/turn/river restantes.
+   - Isso quebrava o EV de all-in, draws e blefes e podia enviesar para fold.
+   - Fix: remover esse early-return e deixar o fluxo “bypass_sum == num_players” fast-forward dealar as streets automaticamente.
+
+3) ✅ **Corrigido (2026-02-14): raise por fração do pote inclui o call embutido (diff)**.
+   - Custo real do raise agora é `diff + raise_add`.
+   - `legal_actions` e `proceed_round()` foram alinhados com essa regra.
+
+4) ✅ **Corrigido (2026-02-14): não pedir ação de jogador ALLIN**.
+   - `game_pointer` agora pula `status != ALIVE` (FOLDED e ALLIN) tanto no `init_game()` quanto no `Round::proceed_round()`.
+
+5) ✅ **Corrigido (2026-02-14): ScenarioSampler inicialização de pesos de blinds**.
+   - Havia um bug de indentação que fazia `_blind_probs_*` serem calculados só quando a tabela estava “incompatível”.
+   - Isso podia gerar crash/atributo faltando em sampling.
+
+6) ✅ **Corrigido (2026-02-14): train_deepcfr.py estava com indentação quebrada** (causava `IndentationError`).
+
+7) ✅ **Corrigido (2026-02-14): checkpoint RNG do scenario**.
+   - O checkpoint agora salva/restaura RNG de forma robusta (numpy Generator ou random.Random).
+
 
 ## 7) Próximos upgrades planejados (curto prazo)
   1) Corrigir os problemas descritos no item 6.	
@@ -292,5 +309,5 @@ Checks:
 
 - disponíveis no repositório público https://github.com/pmartins87/deep_spin
 
-Atualizado em 2026-02-14 14:07:12.
+Atualizado em 2026-02-14 00:00:00.
 

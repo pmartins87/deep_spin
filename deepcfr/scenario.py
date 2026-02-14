@@ -775,9 +775,9 @@ class ScenarioSampler:
         if len(self.blind_weights_hu) != len(self.blind_levels):
             self.blind_weights_hu = [1.0] * len(self.blind_levels)
 
-            # Precompute normalized probabilities (float64) for fast sampling
-            self._blind_probs_3p = np.asarray(_normalize(self.blind_weights_3p), dtype=np.float64)
-            self._blind_probs_hu = np.asarray(_normalize(self.blind_weights_hu), dtype=np.float64)
+        # Precompute normalized probabilities (float64) for fast sampling
+        self._blind_probs_3p = np.asarray(_normalize(self.blind_weights_3p), dtype=np.float64)
+        self._blind_probs_hu = np.asarray(_normalize(self.blind_weights_hu), dtype=np.float64)
 
         # Precomputa map blind -> key string "sb/bb"
         self._blind_key = {(sb, bb): f"{sb}/{bb}" for sb, bb in self.blind_levels}

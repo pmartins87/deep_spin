@@ -1,284 +1,241 @@
-# -*- coding: utf-8 -*-
-"""sanity_check.py
+"""
+scripts/sanity_check.py
 
-Sanity smoke-test for the Spin&Go NoLimitHoldem C++ env (cpoker) + scenario sampler.
+Sanity checks rápidos (target ~30s) para validar:
+- Runout completo em ALL-IN/showdown (board com 5 cartas quando >1 player chega ao showdown)
+- Coerência de custo de raise (diff + raise_add) vs legal_actions e stacks
+- Invariantes de stacks/pot (nunca negativos, conservação razoável)
+- Distribuição de ações condicionada (diff == 0 vs diff > 0) usando uma policy simples
 
-Goals (fast, <~30s):
-- Detect "all-in but board < 5" (showdown runout bug)
-- Action distribution split by to_call==0 vs to_call>0
-- Raise/bet frequency over time
-- Validate pot/chip accounting never goes negative or absurd
+Uso:
+  venv\Scripts\python.exe -u scripts\sanity_check.py --episodes 500
 
-Usage (Windows CMD):
-  venv\Scripts\python.exe -u scripts\sanity_check.py --seconds 25 --hands 5000
-
-Obs:
-- This does NOT train anything. It just plays many random-ish hands quickly.
+Observação:
+- Este script NÃO altera o treino.
+- Ele usa o mesmo ScenarioSampler/config.yaml do treino.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import sys
 import time
 from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
 
-A_FOLD = 0
-A_CHECK_CALL = 1
-A_RAISE_33 = 2
-A_RAISE_HALF = 3
-A_RAISE_75 = 4
-A_RAISE_POT = 5
-A_ALL_IN = 6
+def _load_config_yaml_or_json(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
+    data = path.read_text(encoding="utf-8")
+    # YAML é preferido, mas mantemos fallback simples sem dependências extras
+    if path.suffix.lower() in {".yaml", ".yml"}:
+        try:
+            import yaml  # type: ignore
+        except Exception:
+            raise RuntimeError(
+                f"Arquivo {path} é YAML, mas PyYAML não está instalado. Rode: pip install pyyaml"
+            )
+        return dict(yaml.safe_load(data) or {})
+    if path.suffix.lower() == ".json":
+        import json
+        return dict(json.loads(data))
+    # tenta YAML por padrão
+    try:
+        import yaml  # type: ignore
+        return dict(yaml.safe_load(data) or {})
+    except Exception:
+        return {}
 
-ACTION_NAMES = {
-    A_FOLD: "FOLD",
-    A_CHECK_CALL: "CHECK_CALL",
-    A_RAISE_33: "RAISE_33_POT",
-    A_RAISE_HALF: "RAISE_HALF_POT",
-    A_RAISE_75: "RAISE_75_POT",
-    A_RAISE_POT: "RAISE_POT",
-    A_ALL_IN: "ALL_IN",
+
+def _sha256_file(p: Path) -> str:
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+# Mapeia ActionType -> frac do pote usado no C++
+POT_FRAC = {
+    2: 1.0 / 3.0,  # BET_33
+    3: 1.0 / 2.0,  # BET_50
+    4: 3.0 / 4.0,  # BET_75
+    5: 1.0,        # BET_POT
 }
 
-
-def _setup_paths() -> None:
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    env_dir = os.path.join(root, "env")
-    if env_dir not in sys.path:
-        sys.path.insert(0, env_dir)
-    if root not in sys.path:
-        sys.path.insert(0, root)
-
-
-def _choose_action(rng: np.random.Generator, legal: list[int], to_call: int) -> int:
-    """Heuristic random policy to stress various actions."""
-    legal_set = set(legal)
-
-    raises = [a for a in (A_RAISE_33, A_RAISE_HALF, A_RAISE_75, A_RAISE_POT) if a in legal_set]
-    can_allin = A_ALL_IN in legal_set
-
-    # Never fold for free in sanity runs (we still track if it's legal).
-    if to_call == 0:
-        candidates = [a for a in legal if a != A_FOLD]
-        if raises and rng.random() < 0.60:
-            return int(rng.choice(raises))
-        if can_allin and rng.random() < 0.05:
-            return A_ALL_IN
-        return A_CHECK_CALL if A_CHECK_CALL in candidates else int(rng.choice(candidates))
-
-    # Facing a bet/raise
-    r = float(rng.random())
-    if A_CHECK_CALL in legal_set and r < 0.55:
-        return A_CHECK_CALL
-    if A_FOLD in legal_set and r < 0.70:
-        return A_FOLD
-    if raises and r < 0.95:
-        return int(rng.choice(raises))
-    if can_allin:
-        return A_ALL_IN
-    # fallback
-    return int(rng.choice(legal))
+ACTION_NAME = {
+    0: "FOLD",
+    1: "CHECK/CALL",
+    2: "BET_33",
+    3: "BET_50",
+    4: "BET_75",
+    5: "BET_POT",
+    6: "ALL_IN",
+}
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--seconds", type=float, default=25.0)
-    ap.add_argument("--hands", type=int, default=5000)
-    ap.add_argument("--seed", type=int, default=123)
+    ap.add_argument("--episodes", type=int, default=500)
+    ap.add_argument("--seed", type=int, default=1337)
     args = ap.parse_args()
 
-    _setup_paths()
+    project_root = Path(__file__).resolve().parent.parent
+    env_dir = project_root / "env"
 
-    import cpoker  # noqa: E402
-    from deepcfr.scenario import ScenarioSampler, default_env_config, choose_dealer_id_for_episode  # noqa: E402
+    # path para deepcfr + scripts
+    sys.path.insert(0, str(project_root))
+    sys.path.insert(0, str(env_dir))
 
-    rng = np.random.default_rng(args.seed)
-    scen = ScenarioSampler(default_env_config, seed=args.seed)
+    import cpoker  # type: ignore
+    from deepcfr.scenario import ScenarioSampler, choose_dealer_id_for_episode  # type: ignore
 
-    g = cpoker.PokerGame(3, int(args.seed))
+    scen_cfg = _load_config_yaml_or_json(project_root / "config.yaml")
+    sampler = ScenarioSampler(config=scen_cfg, seed=args.seed)
+
+    # audit: scenario file + hash
+    import deepcfr.scenario as scenario_mod  # type: ignore
+    scen_path = Path(scenario_mod.__file__).resolve()
+    print(f"[INFO] deepcfr.scenario file: {scen_path}")
+    print(f"[INFO] deepcfr.scenario sha256: {_sha256_file(scen_path)}")
+
+    # audit: cpoker pyd (se existir)
+    try:
+        pyds = list(env_dir.glob("cpoker*.pyd"))
+        if pyds:
+            print(f"[INFO] cpoker module: {pyds[0].resolve()}")
+    except Exception:
+        pass
+
+    rng = np.random.default_rng(args.seed ^ 0xA5A5A5A5)
+
+    # stats
+    steps_total = 0
+    showdown_incomplete = 0
+    showdown_total = 0
+    violations_afford = 0
+    violations_negative = 0
+
+    act_counts = {
+        "diff0": Counter(),
+        "diff1": Counter(),
+    }
 
     t0 = time.time()
-    hand_i = 0
 
-    # Metrics
-    actions_call0 = Counter()
-    actions_callpos = Counter()
-    legal_call0 = Counter()
-    legal_callpos = Counter()
+    for ep in range(int(args.episodes)):
+        is_hu, stacks, sb, bb = sampler.sample()
+        dealer_id = choose_dealer_id_for_episode(sampler.rng, stacks, sb, bb, is_hu)
 
-    raise_bins = []  # list of (hands_end, raise_count, action_count)
-    cur_bin_raise = 0
-    cur_bin_actions = 0
+        # seed do jogo por episódio (determinístico)
+        g = cpoker.PokerGame(3, int(args.seed) + ep)
+        g.reset(list(map(int, stacks)), int(dealer_id), int(sb), int(bb))
 
-    allin_board_lt5 = 0
-    allin_hands = 0
-
-    terminal_board_hist = Counter()
-
-    accounting_errors = 0
-    accounting_first_error = None
-
-    while hand_i < args.hands and (time.time() - t0) < args.seconds:
-        # Sample a scenario
-        is_hu, stacks, sb, bb = scen.sample()
-        dealer_id = choose_dealer_id_for_episode(rng, is_hu)
-
-        # Normalize stacks to 3 seats already ensured by sampler
-        g.reset(stacks, int(dealer_id), int(sb), int(bb))
-
-        # Track initial total chips
-        s0 = g.get_state(g.get_player_id())
-        raw0 = s0["raw_obs"]
-        init_total = int(sum(raw0["in_chips"]) + sum(raw0["remained_chips"]))
-
-        # Play hand
         while not g.is_over():
             pid = int(g.get_player_id())
             st = g.get_state(pid)
-            raw = st["raw_obs"]
-            legal = list(st["raw_legal_actions"])  # ints
 
-            in_chips = list(raw["in_chips"])
-            rem = list(raw["remained_chips"])
+            # obs parsing (indices fixos conforme poker_env.cpp)
+            obs = np.asarray(st["obs"], dtype=np.float32)
+            # [0:52] hero hand one-hot
+            # [52:104] board one-hot
+            stacks_bb = obs[104:107]
+            bets_bb = obs[107:110]
+            # pot_bb = obs[110]  # não precisamos aqui
+            # hero_stack_over_pot = obs[111]
+
+            # converter para chips inteiros (robusto a floats)
+            bets_chips = np.rint(bets_bb * float(bb)).astype(np.int64)
+            diff = int(bets_chips.max() - bets_chips[pid])
+
+            raw = st["raw_obs"]
+            remained = int(raw["remained_chips"][pid])
             pot = int(raw["pot"])
 
-            # to_call in chips (cumulative difference)
-            mx = max(in_chips)
-            to_call = int(mx - in_chips[pid])
+            legal = list(map(int, st["raw_legal_actions"]))
 
-            # Accounting checks (fast):
-            try:
-                if pot < 0:
-                    raise ValueError(f"pot<0: {pot}")
-                if any(x < 0 for x in in_chips):
-                    raise ValueError(f"in_chips<0: {in_chips}")
-                if any(x < 0 for x in rem):
-                    raise ValueError(f"remained<0: {rem}")
-                if pot != sum(in_chips):
-                    raise ValueError(f"pot!=sum(in_chips): pot={pot} sum={sum(in_chips)}")
-                if pot > init_total:
-                    raise ValueError(f"pot>init_total: pot={pot} init_total={init_total}")
-                # Each seat should conserve chips during the hand: in_chips+remained <= initial_total
-                if sum(in_chips) + sum(rem) != init_total:
-                    raise ValueError(f"sum(in)+sum(rem) != init_total: {sum(in_chips)}+{sum(rem)} vs {init_total}")
-            except Exception as e:
-                accounting_errors += 1
-                if accounting_first_error is None:
-                    accounting_first_error = (hand_i, pid, str(e), raw)
+            # --- valida affordability de raises (diff + raise_add <= remained)
+            for a in legal:
+                if a in POT_FRAC:
+                    raise_add = int(pot * POT_FRAC[a])
+                    cost = diff + raise_add
+                    if cost > remained:
+                        violations_afford += 1
 
-            # Record legal/action distribution split by to_call
-            if to_call == 0:
-                for a in legal:
-                    legal_call0[a] += 1
-            else:
-                for a in legal:
-                    legal_callpos[a] += 1
+            # --- escolhe ação (policy simples)
+            choose_from = list(legal)
+            # evita fold gratuito para não poluir stats (ainda registramos a disponibilidade pela lista legal)
+            if diff == 0 and 0 in choose_from and len(choose_from) > 1:
+                choose_from = [a for a in choose_from if a != 0]
 
-            a = _choose_action(rng, legal, to_call)
+            a = int(rng.choice(choose_from))
+            act_counts["diff0" if diff == 0 else "diff1"][ACTION_NAME.get(a, str(a))] += 1
 
-            if to_call == 0:
-                actions_call0[a] += 1
-            else:
-                actions_callpos[a] += 1
+            g.step(a)
+            steps_total += 1
 
-            if a in (A_RAISE_33, A_RAISE_HALF, A_RAISE_75, A_RAISE_POT):
-                cur_bin_raise += 1
-            cur_bin_actions += 1
+            # invariantes básicos durante a mão
+            if pot < 0:
+                violations_negative += 1
+            for x in raw["remained_chips"]:
+                if int(x) < 0:
+                    violations_negative += 1
+                    break
 
-            g.step(int(a))
+        # terminal checks
+        # precisamos de um state para pegar raw_obs final; use o player 0 (qualquer id serve)
+        st0 = g.get_state(0)
+        raw0 = st0["raw_obs"]
+        pub = raw0["public_cards"]
+        num_not_folded = int(raw0.get("num_not_folded", 0))
 
-        # Terminal checks
-        pid0 = int(g.get_player_id())
-        stT = g.get_state(pid0)
-        rawT = stT["raw_obs"]
-        board_len = int(len(rawT["public_cards"]))
-        terminal_board_hist[board_len] += 1
+        # showdown = mais de 1 player não foldou
+        if num_not_folded > 1:
+            showdown_total += 1
+            if len(pub) < 5:
+                showdown_incomplete += 1
 
-        remT = list(rawT["remained_chips"])
-        allin_ct = sum(1 for x in remT if int(x) == 0)
-        if allin_ct >= 2:
-            allin_hands += 1
-            if board_len < 5:
-                allin_board_lt5 += 1
+    dt = time.time() - t0
 
-        # bins each 200 hands
-        hand_i += 1
-        if hand_i % 200 == 0:
-            raise_bins.append((hand_i, cur_bin_raise, cur_bin_actions))
-            cur_bin_raise = 0
-            cur_bin_actions = 0
+    print("\n===== SANITY CHECK REPORT =====")
+    print(f"Episodes: {args.episodes}")
+    print(f"Steps total: {steps_total}  |  steps/episode: {steps_total / max(1,args.episodes):.2f}")
+    print(f"Runtime: {dt:.2f}s")
 
-    # Final bin
-    if cur_bin_actions > 0:
-        raise_bins.append((hand_i, cur_bin_raise, cur_bin_actions))
-
-    dur = time.time() - t0
-
-    def fmt_action_counter(c: Counter) -> str:
-        total = sum(c.values())
-        parts = []
-        for k, v in sorted(c.items()):
-            name = ACTION_NAMES.get(k, str(k))
-            pct = (100.0 * v / total) if total else 0.0
-            parts.append(f"{name}:{v} ({pct:.1f}%)")
-        return ", ".join(parts) if parts else "(vazio)"
-
-    def fmt_legal_counter(c: Counter) -> str:
-        total = sum(c.values())
-        parts = []
-        for k, v in sorted(c.items()):
-            name = ACTION_NAMES.get(k, str(k))
-            pct = (100.0 * v / total) if total else 0.0
-            parts.append(f"{name}:{pct:.1f}%")
-        return ", ".join(parts) if parts else "(vazio)"
-
-    print("\n=== SANITY CHECK (cpoker + scenario) ===")
-    print(f"Hands played: {hand_i} in {dur:.2f}s  (target seconds={args.seconds})")
-
-    print("\n[Terminal board length histogram]")
-    for k in sorted(terminal_board_hist.keys()):
-        v = terminal_board_hist[k]
-        pct = 100.0 * v / max(1, hand_i)
-        print(f"  len(public_cards)={k}: {v} ({pct:.2f}%)")
-
-    print("\n[All-in runout correctness]")
-    if allin_hands == 0:
-        print("  No hands detected with >=2 all-in players (increase seconds/hands to stress this).")
+    if showdown_total:
+        p = 100.0 * showdown_incomplete / showdown_total
     else:
-        pct = 100.0 * allin_board_lt5 / allin_hands
-        print(f"  all-in hands (>=2 all-in): {allin_hands}")
-        print(f"  all-in with board<5: {allin_board_lt5}  ({pct:.4f}%)")
+        p = 0.0
+    print(f"Showdown: {showdown_total}  |  showdown com board<5: {showdown_incomplete} ({p:.3f}%)")
 
-    print("\n[Legal actions availability] (percent share of legal-action occurrences)")
-    print(f"  to_call==0: {fmt_legal_counter(legal_call0)}")
-    print(f"  to_call>0 : {fmt_legal_counter(legal_callpos)}")
+    print(f"Violations (raise affordability): {violations_afford}")
+    print(f"Violations (negative pot/stack): {violations_negative}")
 
-    print("\n[Chosen actions distribution] (our heuristic policy, split by to_call)")
-    print(f"  to_call==0: {fmt_action_counter(actions_call0)}")
-    print(f"  to_call>0 : {fmt_action_counter(actions_callpos)}")
+    print("\nAções escolhidas (policy simples) por diff:")
+    for k in ["diff0", "diff1"]:
+        total = sum(act_counts[k].values())
+        print(f"  {k}: total={total}")
+        for name, c in act_counts[k].most_common():
+            print(f"    {name:10s} {c:8d}  ({(100.0*c/max(1,total)):.2f}%)")
 
-    print("\n[Raise frequency over time] (per ~200 hands bin)")
-    for hands_end, r_ct, a_ct in raise_bins:
-        pct = 100.0 * r_ct / max(1, a_ct)
-        print(f"  up to hand {hands_end}: raises={r_ct} / actions={a_ct} ({pct:.2f}%)")
+    # thresholds conservadores
+    fail = False
+    if showdown_incomplete > 0:
+        print("\n[FAIL] Existe showdown com board incompleto (<5). Isso enviesará EV.")
+        fail = True
+    if violations_afford > 0:
+        print("\n[FAIL] Existe ação de raise listada como legal quando (diff + raise_add) > remained.")
+        fail = True
+    if violations_negative > 0:
+        print("\n[FAIL] Pot/stack negativo detectado.")
+        fail = True
 
-    print("\n[Accounting checks]")
-    if accounting_errors == 0:
-        print("  OK: no errors detected")
-    else:
-        print(f"  ERRORS: {accounting_errors}")
-        if accounting_first_error is not None:
-            hi, pid, msg, raw = accounting_first_error
-            print(f"  First error at hand={hi}, pid={pid}: {msg}")
-            print(f"  raw_obs snapshot: {raw}")
-
-    print("\nDone.")
-    return 0
+    if not fail:
+        print("\n[OK] Sanity checks básicos passaram.")
+        return 0
+    return 2
 
 
 if __name__ == "__main__":

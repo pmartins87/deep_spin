@@ -369,10 +369,12 @@ int Round::proceed_round(std::vector<Player>& players, int action_int) {
         if (to_act < 0) to_act = 0;
     }
 
-    // Skip folded players only (as v50)
-    while (players[game_pointer].status == PlayerStatus::FOLDED) {
-        game_pointer = (game_pointer + 1) % num_players;
-    }
+    // Skip non-acting players (FOLDED or ALLIN). This prevents querying actions for ALLIN seats.
+int spins = 0;
+while (spins < num_players && players[game_pointer].status != PlayerStatus::ALIVE) {
+    game_pointer = (game_pointer + 1) % num_players;
+    spins += 1;
+}
 
     return game_pointer;
 }
@@ -1317,6 +1319,12 @@ void PokerGame::init_game() {
         players_[sb_seat].bet(small_blind_);
 
         game_pointer_ = sb_seat;
+        // If SB posted all-in blind (or any non-ALIVE), skip to the next ALIVE player.
+        int spins0 = 0;
+        while (spins0 < num_players_ && players_[game_pointer_].status != PlayerStatus::ALIVE) {
+            game_pointer_ = (game_pointer_ + 1) % num_players_;
+            spins0 += 1;
+        }
 
     } else {
         int s = (dealer_id_ + 1) % num_players_;
@@ -1326,8 +1334,10 @@ void PokerGame::init_game() {
         players_[s].bet(small_blind_);
 
         game_pointer_ = (b + 1) % num_players_;
-        while (players_[game_pointer_].status == PlayerStatus::FOLDED) {
+        int spins1 = 0;
+        while (spins1 < num_players_ && players_[game_pointer_].status != PlayerStatus::ALIVE) {
             game_pointer_ = (game_pointer_ + 1) % num_players_;
+            spins1 += 1;
         }
     }
 
@@ -1441,10 +1451,14 @@ void PokerGame::advance_stage_if_needed() {
         if (p.status != PlayerStatus::FOLDED) not_folded += 1;
         if (p.status != PlayerStatus::FOLDED && p.status != PlayerStatus::ALLIN) any_can_act = true;
     }
-    if (not_folded <= 1 || !any_can_act) {
+    if (not_folded <= 1) {
         round_counter_ = 4;
         return;
     }
+    // NOTE: Do NOT early-return just because nobody can act.
+    // When multiple players are ALL-IN, we must fast-forward and deal the remaining public cards
+    // (flop/turn/river) so that showdown evaluation uses a complete 5-card board.
+
 
     std::vector<int> bypass(num_players_, 0);
     int bypass_sum = 0;
@@ -2486,6 +2500,16 @@ py::dict PokerGame::get_state(int player_id) const {{
     raw_obs["round_counter"] = py::int_(round_counter_);
     raw_obs["stage"] = py::int_(stage_);
     raw_obs["pot"] = py::int_(dealer_.pot);
+
+    // Extra debug fields (do NOT affect obs vector / training compatibility)
+    py::list status_list;
+    int not_folded = 0;
+    for (int i = 0; i < num_players_; ++i) {
+        status_list.append(py::int_(static_cast<int>(players_[i].status)));
+        if (players_[i].status != PlayerStatus::FOLDED) not_folded += 1;
+    }
+    raw_obs["status"] = status_list;
+    raw_obs["num_not_folded"] = py::int_(not_folded);
 
     py::dict state;
     state["obs"] = obs;
