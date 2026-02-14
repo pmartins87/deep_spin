@@ -6,11 +6,6 @@ Inclui:
 - choose_dealer_id_for_episode, exigida pelo train_deepcfr.py
 - Tabela COMPLETA (sem simplificações) de frequências por blind level, para 3 jogadores e Heads-Up
 
-Observação sobre a linha "OUTROS":
-A tabela original tem uma categoria agregada "Outros". Como ela não informa o intervalo exato,
-esta implementação amostra um valor que NÃO cai em nenhum dos intervalos explícitos, dentro de [0, total_chips].
-Isso preserva a massa de probabilidade da categoria, sem inventar um intervalo específico.
-
 Gerado em 2026-02-14T02:10:35.735070Z
 """
 from __future__ import annotations
@@ -647,20 +642,6 @@ REAL_STACK_TABLE_HU: List[Dict[str, Any]] = [
       "100/200": 0.0
     }
   },
-  {
-    "range": "OUTROS",
-    "pct": {
-      "10/20": 0.0,
-      "15/30": 0.0,
-      "20/40": 0.0,
-      "30/60": 0.0,
-      "40/80": 0.0,
-      "50/100": 0.0,
-      "60/120": 0.0,
-      "80/160": 0.0,
-      "100/200": 0.0
-    }
-  }
 ]
 
 
@@ -683,61 +664,61 @@ def _sample_stack_from_table(
 ) -> int:
     """Amostra UM stack (marginal) para um jogador, usando a tabela completa e o blind_key.
 
-    Requisitos importantes:
-    - determinismo/resume: o RNG deve ser restaurável via checkpoint (preferencialmente numpy Generator)
-    - a linha OUTROS preserva massa de probabilidade, sem inventar intervalos
+    Nota:
+    - A tabela deve conter apenas ranges explícitos no formato [lo, hi] (inteiros).
+    - Não existe mais a linha/caso "OUTROS". Se aparecer, isso é bug na tabela.
+    - O retorno é sempre um inteiro em chips dentro do range sorteado.
+
+    Determinismo/resume:
+    - Funciona com numpy.random.Generator (preferido) e também com random.Random (fallback).
     """
+
     weights: List[float] = []
-    ranges: List[Optional[Tuple[int, int]]] = []
+    ranges: List[Tuple[int, int]] = []
 
     for row in table:
-        pct = float(row.get('pct', {}).get(blind_key, 0.0) or 0.0)
-        weights.append(pct)
+        pct = float(row.get("pct", {}).get(blind_key, 0.0) or 0.0)
+        rr = row.get("range", None)
 
-        rr = row.get('range', None)
-        if rr is None:
-            ranges.append(None)
-        else:
-            lo, hi = int(rr[0]), int(rr[1])
-            ranges.append((lo, hi))
+        if isinstance(rr, str):
+            raise ValueError(
+                f'Invalid range spec in stack table: {rr!r}. '
+                f'Expected [lo, hi]. Remove any "OUTROS" rows.'
+            )
+        if not (isinstance(rr, (list, tuple)) and len(rr) == 2):
+            raise ValueError(f"Invalid range spec in stack table: {rr!r}. Expected [lo, hi].")
+
+        lo, hi = int(rr[0]), int(rr[1])
+        if lo < 0 or hi < 0 or lo > hi:
+            raise ValueError(f"Invalid numeric range in stack table: {rr!r}")
+
+        weights.append(max(0.0, pct))
+        ranges.append((lo, hi))
+
+    if len(weights) == 0 or len(weights) != len(ranges):
+        raise RuntimeError(f"Internal error: weights/ranges mismatch: {len(weights)} vs {len(ranges)}")
 
     probs = _normalize(weights)
 
-    # rng.choice (numpy Generator) is preferred; fallback keeps compatibility.
+    # Sorteia o bucket (índice)
     try:
         idx = int(rng.choice(len(probs), p=probs))
     except Exception:
-        # random.Random fallback
         idx = int(rng.choices(range(len(probs)), weights=probs, k=1)[0])
 
-    r = ranges[idx]
+    if idx < 0 or idx >= len(ranges):
+        raise RuntimeError(f"Sampled idx out of bounds: idx={idx}, len(ranges)={len(ranges)}")
 
-    if r is not None:
-        lo, hi = r
-        if lo == hi:
-            return lo
-        try:
-            # numpy Generator: high is exclusive
-            return int(rng.integers(lo, hi + 1))
-        except Exception:
-            return int(rng.randint(lo, hi))
+    lo, hi = ranges[idx]
+    if lo == hi:
+        return lo
 
-    # OUTROS: amostra um valor fora de TODOS os intervalos explícitos
-    explicit = [rr for rr in ranges if rr is not None]
-    for _ in range(50):
-        try:
-            x = int(rng.integers(0, total_chips + 1))
-        except Exception:
-            x = int(rng.randint(0, total_chips))
-        if all(not _range_contains(rr, x) for rr in explicit):
-            return x
-
-    # fallback, se algo muito estranho acontecer
+    # Sorteia um valor inteiro dentro do range [lo, hi]
     try:
-        return int(rng.integers(0, total_chips + 1))
+        # numpy.integers: high é exclusivo
+        return int(rng.integers(lo, hi + 1))
     except Exception:
-        return int(rng.randint(0, total_chips))
-
+        return int(rng.randint(lo, hi))
 
 class ScenarioSampler:
     """

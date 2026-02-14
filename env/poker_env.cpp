@@ -226,9 +226,9 @@ std::vector<ActionType> Round::get_nolimit_legal_actions(const std::vector<Playe
 
     // Remove pot-fraction raises that cannot be afforded (must include the call diff).
     rm_if_unaffordable(ActionType::RAISE_POT, pot);
-    rm_if_unaffordable(ActionType::RAISE_75_POT, static_cast<int>(pot * 0.75f));
-    rm_if_unaffordable(ActionType::RAISE_HALF_POT, static_cast<int>(pot / 2.0f));
-    rm_if_unaffordable(ActionType::RAISE_33_POT, static_cast<int>(pot * 0.33f));
+    rm_if_unaffordable(ActionType::RAISE_75_POT, ((pot * 75) / 100));
+    rm_if_unaffordable(ActionType::RAISE_HALF_POT, (pot / 2));
+    rm_if_unaffordable(ActionType::RAISE_33_POT, ((pot * 33) / 100));
 
     // "Minimum raise" (simplified): if facing a bet/raise (diff>0), require raise_add > diff.
     // This matches the previous intent (q + cur > mx), but now expressed in the correct variables.
@@ -241,13 +241,13 @@ std::vector<ActionType> Round::get_nolimit_legal_actions(const std::vector<Playe
         rm_if_too_small_to_raise(ActionType::RAISE_POT, pot);
     }
     if (std::find(legal.begin(), legal.end(), ActionType::RAISE_75_POT) != legal.end()) {
-        rm_if_too_small_to_raise(ActionType::RAISE_75_POT, static_cast<int>(pot * 0.75f));
+        rm_if_too_small_to_raise(ActionType::RAISE_75_POT, ((pot * 75) / 100));
     }
     if (std::find(legal.begin(), legal.end(), ActionType::RAISE_HALF_POT) != legal.end()) {
-        rm_if_too_small_to_raise(ActionType::RAISE_HALF_POT, static_cast<int>(pot / 2.0f));
+        rm_if_too_small_to_raise(ActionType::RAISE_HALF_POT, (pot / 2));
     }
     if (std::find(legal.begin(), legal.end(), ActionType::RAISE_33_POT) != legal.end()) {
-        rm_if_too_small_to_raise(ActionType::RAISE_33_POT, static_cast<int>(pot * 0.33f));
+        rm_if_too_small_to_raise(ActionType::RAISE_33_POT, ((pot * 33) / 100));
     }
 
     // ---- near-all-in collapse:
@@ -278,21 +278,21 @@ std::vector<ActionType> Round::get_nolimit_legal_actions(const std::vector<Playe
             }
         }
         if (std::find(legal.begin(), legal.end(), ActionType::RAISE_75_POT) != legal.end()) {
-            int ra = static_cast<int>(pot * 0.75f);
+            int ra = ((pot * 75) / 100);
             rm_if_too_small_to_raise(ActionType::RAISE_75_POT, ra);
             if (std::find(legal.begin(), legal.end(), ActionType::RAISE_75_POT) != legal.end()) {
                 if (near_allin(total_cost(ra))) rm(ActionType::RAISE_75_POT);
             }
         }
         if (std::find(legal.begin(), legal.end(), ActionType::RAISE_HALF_POT) != legal.end()) {
-            int ra = static_cast<int>(pot / 2.0f);
+            int ra = (pot / 2);
             rm_if_too_small_to_raise(ActionType::RAISE_HALF_POT, ra);
             if (std::find(legal.begin(), legal.end(), ActionType::RAISE_HALF_POT) != legal.end()) {
                 if (near_allin(total_cost(ra))) rm(ActionType::RAISE_HALF_POT);
             }
         }
         if (std::find(legal.begin(), legal.end(), ActionType::RAISE_33_POT) != legal.end()) {
-            int ra = static_cast<int>(pot * 0.33f);
+            int ra = ((pot * 33) / 100);
             rm_if_too_small_to_raise(ActionType::RAISE_33_POT, ra);
             if (std::find(legal.begin(), legal.end(), ActionType::RAISE_33_POT) != legal.end()) {
                 if (near_allin(total_cost(ra))) rm(ActionType::RAISE_33_POT);
@@ -336,9 +336,9 @@ int Round::proceed_round(std::vector<Player>& players, int action_int) {
         const int pot = dealer ? dealer->pot : 0;
         int raise_add = 0;
         if (action == ActionType::RAISE_POT) raise_add = pot;
-        else if (action == ActionType::RAISE_75_POT) raise_add = static_cast<int>(pot * 0.75f);
-        else if (action == ActionType::RAISE_HALF_POT) raise_add = static_cast<int>(pot / 2.0f);
-        else if (action == ActionType::RAISE_33_POT) raise_add = static_cast<int>(pot * 0.33f);
+        else if (action == ActionType::RAISE_75_POT) raise_add = ((pot * 75) / 100);
+        else if (action == ActionType::RAISE_HALF_POT) raise_add = (pot / 2);
+        else if (action == ActionType::RAISE_33_POT) raise_add = ((pot * 33) / 100);
 
         const int want = diff + raise_add;
         const int pay = do_put(want);

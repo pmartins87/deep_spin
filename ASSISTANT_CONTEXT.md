@@ -138,6 +138,13 @@ O modo HU deve ser gerado/representado de forma consistente para não confundir:
 ### 4.5 legal_mask dentro do obs
 O obs inclui **legal_mask[7]** (0/1) alinhada com as 7 ações, para facilitar estabilidade e evitar ações impossíveis.
 
+### 4.6 Correções críticas de dinâmica (raise e scenario)
+- **Raise com diff > 0**: custo real do raise é **diff + raise_add** (call embutido + incremento). Isso é aplicado tanto na execução do round (proceed_round) quanto na filtragem de legal_actions.
+- **Pot-fractions determinísticas**: BET_33, BET_50, BET_75, BET_POT usam aritmética inteira (33/100, 1/2, 75/100, 1/1) para evitar discrepâncias de float entre C++ e Python.
+- **ScenarioSampler sem “OUTROS”**: a tabela deve conter apenas ranges explícitos [lo, hi]. Qualquer string (ex.: "OUTROS") deve ser tratada como bug.
+- Script de validação rápida: `scripts/sanity_check.py`.
+
+
 ### 4.6 Histórico
 Histórico é essencial.
 A direção do projeto é evoluir de “contadores pobres” para um histórico que capture:
