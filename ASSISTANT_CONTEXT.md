@@ -138,13 +138,6 @@ O modo HU deve ser gerado/representado de forma consistente para não confundir:
 ### 4.5 legal_mask dentro do obs
 O obs inclui **legal_mask[7]** (0/1) alinhada com as 7 ações, para facilitar estabilidade e evitar ações impossíveis.
 
-### 4.6 Correções críticas de dinâmica (raise e scenario)
-- **Raise com diff > 0**: custo real do raise é **diff + raise_add** (call embutido + incremento). Isso é aplicado tanto na execução do round (proceed_round) quanto na filtragem de legal_actions.
-- **Pot-fractions determinísticas**: BET_33, BET_50, BET_75, BET_POT usam aritmética inteira (33/100, 1/2, 75/100, 1/1) para evitar discrepâncias de float entre C++ e Python.
-- **ScenarioSampler sem “OUTROS”**: a tabela deve conter apenas ranges explícitos [lo, hi]. Qualquer string (ex.: "OUTROS") deve ser tratada como bug.
-- Script de validação rápida: `scripts/sanity_check.py`.
-
-
 ### 4.6 Histórico
 Histórico é essencial.
 A direção do projeto é evoluir de “contadores pobres” para um histórico que capture:
@@ -298,7 +291,10 @@ Checks:
 
 7) ✅ **Corrigido (2026-02-14): checkpoint RNG do scenario**.
    - O checkpoint agora salva/restaura RNG de forma robusta (numpy Generator ou random.Random).
-
+8) ✅ **Corrigido (2026-02-14): legal_actions de raise agora é determinístico e consistente com a execução**.
+   - Pot-fraction raises (33/50/75/100) passaram a usar **aritmética inteira** (`pot*33/100`, `pot/2`, `pot*75/100`, `pot`) tanto em `legal_actions` quanto em `proceed_round()`.
+   - Isso elimina divergências por arredondamento de float (ex.: `int(pot*0.33f)` virar 32 em vez de 33).
+   - Pré-flop: se `to_call >= stack`, **nenhum raise/all-in** aparece como legal (apenas FOLD + CHECK/CALL call-all-in), para evitar ações ambíguas.
 
 ## 7) Próximos upgrades planejados (curto prazo)
   1) Corrigir os problemas descritos no item 6.	

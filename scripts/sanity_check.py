@@ -4,8 +4,13 @@ Sanity checks rápidos (target ~30s) para validar:
 
 - Runout completo em ALL-IN/showdown (board com 5 cartas quando >1 player chega ao showdown)
 - Coerência de custo de raise (diff + raise_add) vs legal_actions e stacks
-- Invariantes de stacks/pot (nunca negativos, conservação razoável)
+- Invariantes de stacks/pot (nunca negativos)
 - Distribuição de ações condicionada (diff == 0 vs diff > 0) usando uma policy simples
+
+IMPORTANTE:
+- Seu deepcfr/scenario.py (na branch atual) NÃO exporta default_env_config.
+  O treino (scripts/train_deepcfr.py) instancia ScenarioSampler(config=..., seed=...).
+  Portanto, este sanity_check segue a mesma API.
 
 Uso (Windows):
     venv/Scripts/python.exe -u scripts/sanity_check.py --episodes 500
@@ -15,12 +20,27 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
+import sys
 import time
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
+
+# -----------------------------------------------------------------------------
+# sys.path bootstrap: ao rodar "python scripts/xxx.py", sys.path[0] vira "scripts/".
+# Precisamos inserir a raiz do projeto para importar "deepcfr", e "env/" para cpoker.
+# -----------------------------------------------------------------------------
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT = SCRIPT_DIR.parent
+ENV_DIR = ROOT / "env"
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if str(ENV_DIR) not in sys.path:
+    sys.path.insert(0, str(ENV_DIR))
 
 
 # ActionType enum (C++): mantenha consistente com poker_env.h
@@ -35,7 +55,7 @@ ACTION_NAME = {
 }
 
 # Pot-fraction raise_add EXACT (determinístico, sem float):
-# - BET_33 = floor(pot * 33 / 100)  (mesmo critério do C++)
+# - BET_33 = floor(pot * 33 / 100)
 # - BET_50 = floor(pot / 2)
 # - BET_75 = floor(pot * 75 / 100)
 # - BET_POT = pot
@@ -55,17 +75,34 @@ def _pick_choice_rng(rng):
     """Retorna rng.choice para numpy, ou um wrapper compatível."""
     if hasattr(rng, "choice"):
         return rng.choice
-    # random.Random fallback
-    import random  # noqa: F401
 
     def _choice(seq, p=None):
         if p is None:
-            # type: ignore[attr-defined]
-            return rng.choice(seq)
-        # type: ignore[attr-defined]
-        return rng.choices(seq, weights=p, k=1)[0]
+            return rng.choice(seq)  # type: ignore[attr-defined]
+        return rng.choices(seq, weights=p, k=1)[0]  # type: ignore[attr-defined]
 
     return _choice
+
+
+def _load_config_yaml_or_json(path: Path) -> dict:
+    """Mantém compat com seu train_deepcfr.py: tenta YAML e depois JSON."""
+    if not path.exists() or path.stat().st_size == 0:
+        return {}
+    # YAML (opcional)
+    try:
+        import yaml  # type: ignore
+
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        return dict(data or {})
+    except Exception:
+        pass
+    # JSON
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return dict(json.load(f) or {})
+    except Exception:
+        return {}
 
 
 def main() -> int:
@@ -74,27 +111,36 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=12345)
     args = ap.parse_args()
 
-    # Import local project
-    from deepcfr.scenario import ScenarioSampler, choose_dealer_id_for_episode, default_env_config
+    # Import local project (após sys.path bootstrap acima)
+    from deepcfr.scenario import ScenarioSampler, choose_dealer_id_for_episode
 
     try:
         import cpoker  # type: ignore
     except Exception:
-        # Alguns setups colocam cpoker dentro de env/
         import importlib
 
         cpoker = importlib.import_module("env.cpoker")  # type: ignore
 
-    scen_file = Path(__import__("deepcfr.scenario").scenario.__file__).resolve()  # type: ignore[attr-defined]
-    print(f"[INFO] deepcfr.scenario file: {scen_file}")
-    print(f"[INFO] deepcfr.scenario sha256: {_sha256_file(scen_file)}")
+    # Auditoria: arquivo e hash de scenario importado
+    try:
+        import deepcfr.scenario as scenario_mod  # type: ignore
+
+        scen_file = Path(scenario_mod.__file__).resolve()
+        print(f"[INFO] deepcfr.scenario file: {scen_file}")
+        print(f"[INFO] deepcfr.scenario sha256: {_sha256_file(scen_file)}")
+    except Exception as e:
+        print(f"[WARN] Não consegui resolver __file__/sha256 do scenario: {e}")
+
     try:
         print(f"[INFO] cpoker module: {Path(cpoker.__file__).resolve()}")
     except Exception:
         print("[INFO] cpoker module: <unknown>")
 
-    # ScenarioSampler
-    sampler = ScenarioSampler(default_env_config)
+    scen_cfg = _load_config_yaml_or_json(ROOT / "config.yaml")
+
+    # ScenarioSampler (API atual do repo)
+    sampler = ScenarioSampler(config=scen_cfg, seed=int(args.seed))
+
     rng = np.random.default_rng(int(args.seed))
     rng_choice = _pick_choice_rng(rng)
 
@@ -102,6 +148,7 @@ def main() -> int:
     showdown_total = 0
     showdown_incomplete = 0
     violations_afford = 0
+    violations_preflop_no_raise = 0
     violations_negative = 0
 
     act_counts: Dict[str, Counter] = {"diff0": Counter(), "diff1": Counter()}
@@ -111,21 +158,20 @@ def main() -> int:
     for ep in range(int(args.episodes)):
         scen = sampler.sample()
 
-        # ScenarioSampler.sample() atual retorna dict.
-        # Mantemos fallback para versões antigas que retornavam tupla.
-        if isinstance(scen, dict):
-            is_hu = bool(scen.get("is_heads_up", False))
-            stacks = list(map(int, scen.get("stacks", [])))
-            sb = int(scen.get("sb", 10))
-            bb = int(scen.get("bb", 20))
-        else:
-            is_hu, stacks, sb, bb = scen  # compat antiga
-            stacks = list(map(int, stacks))
+        if not isinstance(scen, dict):
+            raise RuntimeError("ScenarioSampler.sample() deveria retornar dict nesta versão do repo.")
+
+        is_hu = bool(scen.get("is_heads_up", False))
+        stacks = list(map(int, scen.get("stacks", [])))
+        sb = int(scen.get("sb", 10))
+        bb = int(scen.get("bb", 20))
 
         dealer_id = int(choose_dealer_id_for_episode(sampler.rng, stacks, sb, bb, is_hu))
 
         # seed do jogo por episódio (determinístico)
         g = cpoker.PokerGame(3, int(args.seed) + ep)
+        if hasattr(g, "set_seed"):
+            g.set_seed(int(args.seed) + ep)
         g.reset(stacks, dealer_id, int(sb), int(bb))
 
         while not g.is_over():
@@ -134,37 +180,42 @@ def main() -> int:
 
             obs = np.asarray(st["obs"], dtype=np.float32)
 
-            # Layout fixo conforme poker_env.cpp
-            # [0:52] hero hand one-hot
-            # [52:104] board one-hot
-            # [104:107] stacks (bb)
-            # [107:110] current_bets (round_.raised) (bb)
-            # [110] pot (bb)
+            # Layout (C++): bets por player em bb ficam nessa fatia.
+            # Mantemos isso porque raw_obs não expõe round_.raised diretamente.
             bets_bb = obs[107:110]
-
-            # converter para chips inteiros (robusto a floats)
             bets_chips = np.rint(bets_bb * float(bb)).astype(np.int64)
             diff = int(bets_chips.max() - bets_chips[pid])
 
             raw = st["raw_obs"]
             remained = int(raw["remained_chips"][pid])
             pot = int(raw["pot"])
+            stage = int(raw.get("stage", -1))
 
             legal = list(map(int, st["raw_legal_actions"]))
 
-            # --- valida affordability de raises (diff + raise_add <= remained)
-            for a in legal:
-                if a in POT_RAISE_ADD:
-                    raise_add = int(POT_RAISE_ADD[a][1](pot))
-                    cost = diff + raise_add
-                    if cost > remained:
-                        violations_afford += 1
+            # Pré-flop: se não consegue cobrir o call (diff >= remained), NÃO pode existir raise nem ALL_IN.
+            # CHECK/CALL cobre o call-all-in via clamp.
+            if stage == 0 and diff > 0 and diff >= remained:
+                for a in legal:
+                    if a in (2, 3, 4, 5, 6):  # raise labels + all-in
+                        violations_preflop_no_raise += 1
+                        break
 
-            # --- escolhe ação (policy simples)
+            # valida affordability de raises (diff + raise_add <= remained)
+            # OBS: no pré-flop (stage==0) os rótulos RAISE_* são BB-based (open/iso/3bet abstraídos),
+            # não pot-fraction. Portanto, este check de pot-fraction só é válido pós-flop (stage>0).
+            if stage > 0:
+                for a in legal:
+                    if a in POT_RAISE_ADD:
+                        raise_add = int(POT_RAISE_ADD[a][1](pot))
+                        cost = diff + raise_add
+                        if cost > remained:
+                            violations_afford += 1
+
+            # policy simples para stats
             choose_from = list(legal)
-
-            # Evita fold gratuito para não poluir stats (ainda registramos a disponibilidade pela lista legal).
             if diff == 0 and 0 in choose_from and len(choose_from) > 1:
+                # evita fold gratuito para não poluir distribuição
                 choose_from = [a for a in choose_from if a != 0]
 
             a = int(rng_choice(choose_from))
@@ -187,7 +238,6 @@ def main() -> int:
         pub = raw0["public_cards"]
         num_not_folded = int(raw0.get("num_not_folded", 0))
 
-        # showdown = mais de 1 player não foldou
         if num_not_folded > 1:
             showdown_total += 1
             if len(pub) < 5:
@@ -200,13 +250,11 @@ def main() -> int:
     print(f"Steps total: {steps_total}  |  steps/episode: {steps_total / max(1,args.episodes):.2f}")
     print(f"Runtime: {dt:.2f}s")
 
-    if showdown_total:
-        p = 100.0 * showdown_incomplete / showdown_total
-    else:
-        p = 0.0
+    p = (100.0 * showdown_incomplete / showdown_total) if showdown_total else 0.0
     print(f"Showdown: {showdown_total}  |  showdown com board<5: {showdown_incomplete} ({p:.3f}%)")
 
-    print(f"Violations (raise affordability): {violations_afford}")
+    print(f"Violations (raise affordability, postflop pot-fraction): {violations_afford}")
+    print(f"Violations (preflop raise when cannot call): {violations_preflop_no_raise}")
     print(f"Violations (negative pot/stack): {violations_negative}")
 
     print("\nAções escolhidas (policy simples) por diff:")
@@ -218,10 +266,14 @@ def main() -> int:
             print(f"    {name:<14} {cnt:6d}  ({(100.0*cnt/max(1,tot)):.2f}%)")
 
     if violations_afford > 0:
-        print("\n[FAIL] Existe ação de raise listada como legal quando (diff + raise_add) > remained.")
+        print("\n[FAIL] Pós-flop: existe raise pot-fraction legal quando (diff + raise_add) > remained.")
         return 2
 
-    print("\n[OK] Nenhuma violação de affordability detectada.")
+    if violations_preflop_no_raise > 0:
+        print("\n[FAIL] Pré-flop: existe raise/all-in legal quando o jogador não cobre o call (diff >= remained).")
+        return 3
+
+    print("\n[OK] Nenhuma violação detectada (postflop affordability + preflop no-raise).")
     return 0
 
 

@@ -226,9 +226,9 @@ std::vector<ActionType> Round::get_nolimit_legal_actions(const std::vector<Playe
 
     // Remove pot-fraction raises that cannot be afforded (must include the call diff).
     rm_if_unaffordable(ActionType::RAISE_POT, pot);
-    rm_if_unaffordable(ActionType::RAISE_75_POT, ((pot * 75) / 100));
-    rm_if_unaffordable(ActionType::RAISE_HALF_POT, (pot / 2));
-    rm_if_unaffordable(ActionType::RAISE_33_POT, ((pot * 33) / 100));
+    rm_if_unaffordable(ActionType::RAISE_75_POT, (pot * 75) / 100);
+    rm_if_unaffordable(ActionType::RAISE_HALF_POT, pot / 2);
+    rm_if_unaffordable(ActionType::RAISE_33_POT, (pot * 33) / 100);
 
     // "Minimum raise" (simplified): if facing a bet/raise (diff>0), require raise_add > diff.
     // This matches the previous intent (q + cur > mx), but now expressed in the correct variables.
@@ -241,13 +241,13 @@ std::vector<ActionType> Round::get_nolimit_legal_actions(const std::vector<Playe
         rm_if_too_small_to_raise(ActionType::RAISE_POT, pot);
     }
     if (std::find(legal.begin(), legal.end(), ActionType::RAISE_75_POT) != legal.end()) {
-        rm_if_too_small_to_raise(ActionType::RAISE_75_POT, ((pot * 75) / 100));
+        rm_if_too_small_to_raise(ActionType::RAISE_75_POT, (pot * 75) / 100);
     }
     if (std::find(legal.begin(), legal.end(), ActionType::RAISE_HALF_POT) != legal.end()) {
-        rm_if_too_small_to_raise(ActionType::RAISE_HALF_POT, (pot / 2));
+        rm_if_too_small_to_raise(ActionType::RAISE_HALF_POT, pot / 2);
     }
     if (std::find(legal.begin(), legal.end(), ActionType::RAISE_33_POT) != legal.end()) {
-        rm_if_too_small_to_raise(ActionType::RAISE_33_POT, ((pot * 33) / 100));
+        rm_if_too_small_to_raise(ActionType::RAISE_33_POT, (pot * 33) / 100);
     }
 
     // ---- near-all-in collapse:
@@ -278,21 +278,21 @@ std::vector<ActionType> Round::get_nolimit_legal_actions(const std::vector<Playe
             }
         }
         if (std::find(legal.begin(), legal.end(), ActionType::RAISE_75_POT) != legal.end()) {
-            int ra = ((pot * 75) / 100);
+            int ra = (pot * 75) / 100;
             rm_if_too_small_to_raise(ActionType::RAISE_75_POT, ra);
             if (std::find(legal.begin(), legal.end(), ActionType::RAISE_75_POT) != legal.end()) {
                 if (near_allin(total_cost(ra))) rm(ActionType::RAISE_75_POT);
             }
         }
         if (std::find(legal.begin(), legal.end(), ActionType::RAISE_HALF_POT) != legal.end()) {
-            int ra = (pot / 2);
+            int ra = pot / 2;
             rm_if_too_small_to_raise(ActionType::RAISE_HALF_POT, ra);
             if (std::find(legal.begin(), legal.end(), ActionType::RAISE_HALF_POT) != legal.end()) {
                 if (near_allin(total_cost(ra))) rm(ActionType::RAISE_HALF_POT);
             }
         }
         if (std::find(legal.begin(), legal.end(), ActionType::RAISE_33_POT) != legal.end()) {
-            int ra = ((pot * 33) / 100);
+            int ra = (pot * 33) / 100;
             rm_if_too_small_to_raise(ActionType::RAISE_33_POT, ra);
             if (std::find(legal.begin(), legal.end(), ActionType::RAISE_33_POT) != legal.end()) {
                 if (near_allin(total_cost(ra))) rm(ActionType::RAISE_33_POT);
@@ -336,9 +336,9 @@ int Round::proceed_round(std::vector<Player>& players, int action_int) {
         const int pot = dealer ? dealer->pot : 0;
         int raise_add = 0;
         if (action == ActionType::RAISE_POT) raise_add = pot;
-        else if (action == ActionType::RAISE_75_POT) raise_add = ((pot * 75) / 100);
-        else if (action == ActionType::RAISE_HALF_POT) raise_add = (pot / 2);
-        else if (action == ActionType::RAISE_33_POT) raise_add = ((pot * 33) / 100);
+        else if (action == ActionType::RAISE_75_POT) raise_add = (pot * 75) / 100;
+        else if (action == ActionType::RAISE_HALF_POT) raise_add = pot / 2;
+        else if (action == ActionType::RAISE_33_POT) raise_add = (pot * 33) / 100;
 
         const int want = diff + raise_add;
         const int pay = do_put(want);
@@ -2065,6 +2065,18 @@ std::vector<ActionType> PokerGame::get_legal_actions(int player_id) const {
         const int to_call_chips = std::max(0, mx_chips - my_chips);
         const int stack_chips = players_[player_id].remained_chips;
         const int min_raise_to = mx_chips + (mx_chips - second_mx);
+
+        // If player cannot cover the call, raising is impossible.
+        // Keep CHECK/CALL (it becomes call-all-in via Player::bet clamp) and FOLD.
+        // Remove ALL_IN to avoid an ambiguous "all-in raise" path when it is only a call-all-in.
+        if (to_call_chips > 0 && to_call_chips >= stack_chips) {
+            legal.erase(std::remove(legal.begin(), legal.end(), ActionType::RAISE_33_POT), legal.end());
+            legal.erase(std::remove(legal.begin(), legal.end(), ActionType::RAISE_HALF_POT), legal.end());
+            legal.erase(std::remove(legal.begin(), legal.end(), ActionType::RAISE_75_POT), legal.end());
+            legal.erase(std::remove(legal.begin(), legal.end(), ActionType::RAISE_POT), legal.end());
+            legal.erase(std::remove(legal.begin(), legal.end(), ActionType::ALL_IN), legal.end());
+            return legal;
+        }
 
         // against 4bet+: only fold and all-in; call only if it is call-all-in
         if (d.num_raises >= 3) {
