@@ -202,6 +202,12 @@ std::vector<ActionType> Round::get_nolimit_legal_actions(const std::vector<Playe
         legal.erase(std::remove(legal.begin(), legal.end(), a), legal.end());
     };
 
+    // We forbid folding when there is nothing to call (diff == 0).
+    // This removes a dominated action, reduces degeneracy in the tree, and helps CFR stability.
+    if (diff == 0) {
+        rm(ActionType::FOLD);
+    }
+
     // If player cannot cover the call, raising is impossible.
     // Keep CHECK/CALL (it becomes a call-all-in via Player::bet clamp) and FOLD.
     // Remove ALL_IN here to avoid an ambiguous "all-in raise" path when it is only a call-all-in.
