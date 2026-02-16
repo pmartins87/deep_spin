@@ -123,19 +123,27 @@ class DeepCFRTrainer:
             n.train()
 
     def _sample_episode_spec(self, ep_seed: int) -> EpisodeSpec:
-        # ScenarioSampler.sample() retorna dict com stacks/sb/bb/is_hu/dead_players...
+        # ScenarioSampler.sample() retorna dict com stacks/sb/bb/game_is_hu/dead_players...
         sc = self.scenario_sampler.sample()
         stacks = list(sc["stacks"])
         sb = int(sc["sb"])
         bb = int(sc["bb"])
-        is_hu = bool(sc.get("is_hu", False))
+        game_is_hu = bool(sc.get("game_is_hu", False))
 
-        # choose_dealer_id_for_episode pode ajustar stacks in-place para caber blinds
+        # dealer deve ser escolhido considerando seats vivos (stacks > 0)
         stacks_for_roles = list(stacks)
-        dealer = int(self.choose_dealer_fn(self.rng, stacks_for_roles, sb, bb, is_hu))
+        dealer = int(self.choose_dealer_fn(self.rng, stacks_for_roles, sb, bb, game_is_hu))
         stacks = stacks_for_roles
 
-        return EpisodeSpec(ep_seed=int(ep_seed), stacks=stacks, dealer_id=dealer, sb=sb, bb=bb, is_hu=is_hu)
+        return EpisodeSpec(
+            ep_seed=int(ep_seed),
+            stacks=stacks,
+            dealer_id=dealer,
+            sb=sb,
+            bb=bb,
+            game_is_hu=game_is_hu
+        )
+
 
     def collect_advantage(self, traverser_id: int, traversals_per_player: int | None = None) -> int:
         traverser_id = int(traverser_id)

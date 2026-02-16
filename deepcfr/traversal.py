@@ -71,15 +71,16 @@ def sample_action(rng: np.random.Generator, sigma: np.ndarray, raw_legal_actions
 
 
 class EpisodeSpec:
-    __slots__ = ("ep_seed", "stacks", "dealer_id", "sb", "bb", "is_hu")
+    __slots__ = ("ep_seed", "stacks", "dealer_id", "sb", "bb", "game_is_hu")
 
-    def __init__(self, ep_seed: int, stacks: list[int], dealer_id: int, sb: int, bb: int, is_hu: bool = False):
+    def __init__(self, ep_seed: int, stacks: List[int], dealer_id: int, sb: int, bb: int, game_is_hu: bool = False):
         self.ep_seed = int(ep_seed)
-        self.stacks = list(stacks)
+        self.stacks = list(map(int, stacks))
         self.dealer_id = int(dealer_id)
         self.sb = int(sb)
         self.bb = int(bb)
-        self.is_hu = bool(is_hu)
+        self.game_is_hu = bool(game_is_hu)
+
 
 
 class Replayer:

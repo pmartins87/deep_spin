@@ -18,22 +18,21 @@ from typing import Dict, List, Tuple, Optional, Any
 # ======================================================================================
 #  Helper exigida pelo train_deepcfr.py
 # ======================================================================================
-def choose_dealer_id_for_episode(rng, stacks, sb, bb, is_hu):
-    """Compat, para o treino e a avaliação.
-    
-    - Sorteia o dealer (BTN) entre jogadores com stack > 0.
-    - Não altera stacks.
-    - Mesmo que algum stack seja menor que o blind, o engine já faz clamp
-      no post (Player.bet), então não precisamos de ajustes artificiais aqui.
+def choose_dealer_id_for_episode(rng: np.random.Generator,
+                                stacks: List[int],
+                                sb: int,
+                                bb: int,
+                                game_is_hu: bool) -> int:
+    """Escolhe o dealer_id (BTN) do episódio.
+
+    NOMENCLATURA:
+      - game_is_hu: HU do *jogo* (um seat está morto/eliminado antes da mão começar).
+      - hand_is_hu: HU dentro da mão por fold (tratado no C++ env).
+
+    Regra atual: dealer aleatório entre seats vivos (stacks > 0).
     """
     alive = [i for i, s in enumerate(stacks) if s > 0]
-    if not alive:
-        return 0
-    try:
-        return int(rng.choice(alive))
-    except Exception:
-        # fallback para random.Random
-        return int(alive[int(rng.random() * len(alive))])
+    return int(rng.choice(alive))
 
 # ======================================================================================
 #  Tabelas completas de frequência, extraídas da tabela de mãos reais enviada pelo usuário
@@ -767,27 +766,55 @@ class ScenarioSampler:
         # Para evitar distribuição vazia se algum blind for sorteado nesses níveis, fazemos fallback para 60/120.
         self._fallback_3p_blind = "60/120"
 
-    def _sample_blinds(self, is_hu: bool) -> Tuple[int, int]:
-        probs = self._blind_probs_hu if is_hu else self._blind_probs_3p
-        idx = int(self.rng.choice(len(self.blind_levels), p=probs))
+    def _sample_blinds(self, game_is_hu: bool) -> Tuple[int, int]:
+        # Use precomputed categorical distributions (fast + avoids attribute-name mismatches).
+        if game_is_hu:
+            idx = int(self.rng.choice(len(self.blind_levels), p=self._blind_probs_hu))
+        else:
+            idx = int(self.rng.choice(len(self.blind_levels), p=self._blind_probs_3p))
+
         sb, bb = self.blind_levels[idx]
         return int(sb), int(bb)
 
     def _sample_stacks_hu(self, blind_key: str) -> List[int]:
-        # Amostra um stack e usa o complemento, garante stacks válidos
+        # HU do *jogo*: 1 seat morto (stack==0) ANTES da mão começar.
+        # Para evitar assimetria, randomizamos QUAL seat fica morto.
         for _ in range(50):
             a = _sample_stack_from_table(self.rng, REAL_STACK_TABLE_HU, blind_key, self.total_chips)
             if 1 <= a <= self.total_chips - 1:
                 b = self.total_chips - a
                 if b > 0:
-                    stacks = [a, b, 0]
-                    # BUGFIX: não usar slice, pois cria cópia e não embaralha in-place.
+                    # Randomiza qual jogador vivo recebe qual stack
                     if float(self.rng.random()) < 0.5:
-                        stacks[0], stacks[1] = stacks[1], stacks[0]
+                        a, b = b, a
+
+                    dead_seat = int(self.rng.integers(0, 3))
+                    alive_seats = [0, 1, 2]
+                    alive_seats.remove(dead_seat)
+                    alive_seats = list(self.rng.permutation(alive_seats))
+
+                    stacks = [0, 0, 0]
+                    stacks[alive_seats[0]] = int(a)
+                    stacks[alive_seats[1]] = int(b)
+                    stacks[dead_seat] = 0
                     return stacks
+
         # fallback
         a = int(self.rng.integers(1, self.total_chips))
-        return [a, self.total_chips - a, 0]
+        b = self.total_chips - a
+        if float(self.rng.random()) < 0.5:
+            a, b = b, a
+
+        dead_seat = int(self.rng.integers(0, 3))
+        alive_seats = [0, 1, 2]
+        alive_seats.remove(dead_seat)
+        alive_seats = list(self.rng.permutation(alive_seats))
+
+        stacks = [0, 0, 0]
+        stacks[alive_seats[0]] = int(a)
+        stacks[alive_seats[1]] = int(b)
+        stacks[dead_seat] = 0
+        return stacks
 
     def _sample_stacks_3p(self, blind_key: str) -> List[int]:
         # Se a coluna do blind_key for toda 0, cai no fallback 60/120
@@ -840,12 +867,12 @@ class ScenarioSampler:
         return out
 
     def sample(self) -> Dict[str, Any]:
-        is_hu = (self.rng.random() < self.heads_up_prob)
+        game_is_hu = (self.rng.random() < self.heads_up_prob)
 
-        sb, bb = self._sample_blinds(is_hu=is_hu)
+        sb, bb = self._sample_blinds(game_is_hu=game_is_hu)
         blind_key = self._blind_key.get((sb, bb), f"{sb}/{bb}")
 
-        if is_hu:
+        if game_is_hu:
             stacks = self._sample_stacks_hu(blind_key)
             dead = [i for i, s in enumerate(stacks) if s <= 0]
         else:
@@ -854,7 +881,7 @@ class ScenarioSampler:
 
         return {
             "total_chips": self.total_chips,
-            "is_heads_up": bool(is_hu),
+            "game_is_hu": bool(game_is_hu),
             "sb": sb,
             "bb": bb,
             "stacks": stacks,

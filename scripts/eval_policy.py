@@ -274,13 +274,13 @@ def evaluate(
         stacks = list(scen["stacks"])
         sb = int(scen["sb"])
         bb = int(scen["bb"])
-        is_hu = bool(scen["is_hu"])
-        if is_hu:
+        game_is_hu = bool(scen["game_is_hu"])
+        if game_is_hu:
             hu += 1
         else:
             threeway += 1
 
-        dealer = int(choose_dealer_id_for_episode(rng, stacks, sb, bb, is_hu))
+        dealer = int(choose_dealer_id_for_episode(rng, stacks, sb, bb, game_is_hu))
         ep_seed = int(rng.integers(0, 2**31 - 1))
 
         g = cpoker.PokerGame(3, ep_seed)

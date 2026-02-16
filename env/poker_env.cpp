@@ -976,66 +976,120 @@ static std::array<float, 4> analyze_hero_vs_board_texture(const std::vector<Card
     return vec;
 }
 
-static std::array<float, 11> get_position_scenario(int my_id,
-                                                   int dealer_id,
-                                                   int /*game_pointer*/,
-                                                   const std::vector<Player>& players) {
+static std::array<float, 11> get_position_scenario(
+    int my_id,
+    int dealer_id,
+    int game_pointer,
+    const std::vector<Player>& players
+) {
+    (void)game_pointer;
     std::array<float, 11> vec{};
     vec.fill(0.0f);
 
+    // Constrói lista de seats ativos (não folded).
     std::vector<int> active;
-    active.reserve(players.size());
-    for (int i = 0; i < (int)players.size(); ++i) {
-        if (players[i].status != PlayerStatus::FOLDED) active.push_back(i);
+    active.reserve(3);
+    for (int i = 0; i < 3; i++) {
+        if (players[i].status != PlayerStatus::FOLDED) {
+            active.push_back(i);
+        }
     }
-    int num_active = (int)active.size();
-    if (num_active == 0) return vec;
+    const int num_active = static_cast<int>(active.size());
 
-    int btn = dealer_id;
-    int sb = (dealer_id + 1) % (int)players.size();
-    int bb = (dealer_id + 2) % (int)players.size();
-
-    auto hero_pos = [&](int pid)->int {
-        if (pid == btn) return 0; // BTN
-        if (pid == sb)  return 1; // SB
-        if (pid == bb)  return 2; // BB
-        return 3;
+    // hero_pos: 0=BTN(dealer), 1=SB, 2=BB (em 3-handed, relativo ao dealer_id).
+    auto hero_pos = [&](int pid) -> int {
+        int btn = dealer_id;
+        int sb  = (dealer_id + 1) % 3;
+        int bb  = (dealer_id + 2) % 3;
+        if (pid == btn) return 0;
+        if (pid == sb)  return 1;
+        return 2;
     };
 
-    int hp = hero_pos(my_id);
-
-    if (num_active == 2) {
-        if (hp == 0 || hp == 1) vec[0] = 1.0f; // HUSB
-        else vec[1] = 1.0f;                    // HUBB
-        return vec;
-    }
-
-    if (num_active == 3) {
-        if (hp == 0) vec[8] = 1.0f;
-        else if (hp == 1) vec[9] = 1.0f;
-        else if (hp == 2) vec[10] = 1.0f;
-        return vec;
-    }
-
+    // Encontra um seat folded (se existir).
     int folded_id = -1;
-    for (int i = 0; i < (int)players.size(); ++i) {
-        if (players[i].status == PlayerStatus::FOLDED) { folded_id = i; break; }
-    }
-    if (folded_id == -1) return vec;
-
-    if (folded_id == sb) {
-        if (hp == 0) vec[2] = 1.0f;
-        else if (hp == 2) vec[3] = 1.0f;
-    } else if (folded_id == bb) {
-        if (hp == 0) vec[4] = 1.0f;
-        else if (hp == 1) vec[5] = 1.0f;
-    } else if (folded_id == btn) {
-        if (hp == 1) vec[6] = 1.0f;
-        else if (hp == 2) vec[7] = 1.0f;
+    for (int i = 0; i < 3; i++) {
+        if (players[i].status == PlayerStatus::FOLDED) {
+            folded_id = i;
+            break;
+        }
     }
 
+    // ============================
+    // 3-handed (todos ativos)
+    // ============================
+    if (num_active == 3) {
+        int hp = hero_pos(my_id);
+        if      (hp == 0) vec[8]  = 1.0f; // 3p BTN
+        else if (hp == 1) vec[9]  = 1.0f; // 3p SB
+        else              vec[10] = 1.0f; // 3p BB
+        return vec;
+    }
+
+    // ============================
+    // Heads-up dentro da mão (hand_is_hu) OU HU do jogo (game_is_hu)
+    // ============================
+    if (num_active == 2) {
+        const bool game_is_hu = (folded_id >= 0) ? is_dead_seat_v50_style(players[folded_id]) : false;
+        const bool hand_is_hu = !game_is_hu;
+
+        if (game_is_hu) {
+            // HU do jogo: SB sempre é o dealer (BTN), BB é o outro seat vivo.
+            if (my_id == dealer_id) vec[0] = 1.0f; // HUSB
+            else                    vec[1] = 1.0f; // HUBB
+            return vec;
+        }
+
+        // hand_is_hu: alguém foldou dentro da mão (a mão começou 3-way).
+        // Mantém o mapeamento existente baseado em qual seat foldou (relativo ao dealer).
+        int hp = hero_pos(my_id);
+        int btn = dealer_id;
+        int sb  = (dealer_id + 1) % 3;
+        int bb  = (dealer_id + 2) % 3;
+
+        if (folded_id == sb) {
+            // SB foldou -> HU entre BTN e BB
+            if      (hp == 0) vec[2] = 1.0f;
+            else if (hp == 2) vec[3] = 1.0f;
+        } else if (folded_id == bb) {
+            // BB foldou -> HU entre BTN e SB
+            if      (hp == 0) vec[4] = 1.0f;
+            else if (hp == 1) vec[5] = 1.0f;
+        } else if (folded_id == btn) {
+            // BTN foldou -> HU entre SB e BB
+            if      (hp == 1) vec[6] = 1.0f;
+            else if (hp == 2) vec[7] = 1.0f;
+        } else {
+            // fallback: não deveria acontecer
+            if (hp == 0 || hp == 1) vec[0] = 1.0f;
+            else                    vec[1] = 1.0f;
+        }
+        return vec;
+    }
+
+    // ============================
+    // Casos residuais (ex: num_active==1)
+    // ============================
+    if (folded_id != -1) {
+        int hp = hero_pos(my_id);
+        int btn = dealer_id;
+        int sb  = (dealer_id + 1) % 3;
+        int bb  = (dealer_id + 2) % 3;
+
+        if (folded_id == sb) {
+            if      (hp == 0) vec[2] = 1.0f;
+            else if (hp == 2) vec[3] = 1.0f;
+        } else if (folded_id == bb) {
+            if      (hp == 0) vec[4] = 1.0f;
+            else if (hp == 1) vec[5] = 1.0f;
+        } else if (folded_id == btn) {
+            if      (hp == 1) vec[6] = 1.0f;
+            else if (hp == 2) vec[7] = 1.0f;
+        }
+    }
     return vec;
 }
+
 
 
 static std::array<float, 17> build_history_vec(const std::vector<std::pair<int,int>>& hist,
@@ -1354,6 +1408,7 @@ void PokerGame::init_game() {
     round_.start_new_round(players_, game_pointer_, &raised_init);
 
     update_pot();
+	advance_stage_if_needed();
 }
 
 // ======================================================================================
@@ -1545,12 +1600,12 @@ static inline bool is_aggressive_action_int(int a) {
 // Board texture: 31
 // Hero vs board: 4
 // Action context (current street): 51 (continuous 7 + postflop 13 + preflop 31)
-// History v2 (prev streets): 98
+// History v2 (prev streets): 96
 // legal_mask: 7
-// Total: 340
+// Total: 338
 // OBS layout (v2): base 235 + history(96) + legal_mask(7) = 338
 static constexpr int OBS_DIM = 338;
-static constexpr int HISTORY_V2_DIM = 98;
+static constexpr int HISTORY_V2_DIM = 96;
 
 
 struct PreflopDerived {

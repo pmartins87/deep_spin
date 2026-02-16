@@ -196,11 +196,11 @@ def run_adv_task(task: AdvTask):
         stacks = list(sc["stacks"])
         sb = int(sc["sb"])
         bb = int(sc["bb"])
-        is_hu = bool(sc.get("is_hu", False))
+        game_is_hu = bool(sc.get("game_is_hu", False))
 
         stacks2 = list(stacks)
-        dealer = int(choose_dealer(rng, stacks2, sb, bb, is_hu))
-        spec = EpisodeSpec(ep_seed=int(ep_seed), stacks=stacks2, dealer_id=dealer, sb=sb, bb=bb, is_hu=is_hu)
+        dealer = int(choose_dealer(rng, stacks2, sb, bb, game_is_hu))
+        spec = EpisodeSpec(ep_seed=int(ep_seed), stacks=stacks2, dealer_id=dealer, sb=sb, bb=bb, game_is_hu=game_is_hu)
 
         traverser.traverse(spec, traverser=int(task.traverser_id), history_actions=[])
 
@@ -236,11 +236,11 @@ def run_pol_task(task: PolTask):
         stacks = list(sc["stacks"])
         sb = int(sc["sb"])
         bb = int(sc["bb"])
-        is_hu = bool(sc.get("is_hu", False))
+        game_is_hu = bool(sc.get("game_is_hu", False))
 
         stacks2 = list(stacks)
-        dealer = int(choose_dealer(rng, stacks2, sb, bb, is_hu))
-        spec = EpisodeSpec(ep_seed=int(ep_seed), stacks=stacks2, dealer_id=dealer, sb=sb, bb=bb, is_hu=is_hu)
+        dealer = int(choose_dealer(rng, stacks2, sb, bb, game_is_hu))
+        spec = EpisodeSpec(ep_seed=int(ep_seed), stacks=stacks2, dealer_id=dealer, sb=sb, bb=bb, game_is_hu=game_is_hu)
 
         g = replayer.make_game(spec)
 

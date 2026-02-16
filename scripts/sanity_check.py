@@ -161,7 +161,7 @@ def main() -> int:
         if not isinstance(scen, dict):
             raise RuntimeError("ScenarioSampler.sample() deveria retornar dict nesta versão do repo.")
 
-        is_hu = bool(scen.get("is_heads_up", False))
+        is_hu = bool(scen.get("game_is_hu", False))
         stacks = list(map(int, scen.get("stacks", [])))
         sb = int(scen.get("sb", 10))
         bb = int(scen.get("bb", 20))
