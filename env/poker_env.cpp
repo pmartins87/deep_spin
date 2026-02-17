@@ -15,7 +15,11 @@ namespace poker {
 static inline bool is_aggressive_action_int(int a);
 static inline int player_preflop_pos_bucket(int player_id, int dealer_id);
 static inline int compute_preflop_ctx10(const std::vector<std::pair<int,int>>& hist_pre, int hero_id, int dealer_id);
+static inline int compute_postflop_ctx6(int amounttocall_chips,
+                                       int mycurrentbet_chips,
+                                       int potcommon_chips);
 } // namespace poker
+
 
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
@@ -141,6 +145,50 @@ Card Dealer::deal_card() {
     Card c = deck.back();
     deck.pop_back();
     return c;
+}
+
+std::string Dealer::get_rng_state() const {
+    std::ostringstream oss;
+    oss << rng_;
+    return oss.str();
+}
+
+void Dealer::set_rng_state(const std::string& s) {
+    std::istringstream iss(s);
+    iss >> rng_;
+    if (!iss) {
+        throw std::runtime_error("Dealer::set_rng_state failed to parse RNG state");
+    }
+}
+
+std::string PokerGame::get_rng_state() const {
+    std::ostringstream oss;
+    oss << rng_;
+    return oss.str();
+}
+
+void PokerGame::set_rng_state(const std::string& s) {
+    std::istringstream iss(s);
+    iss >> rng_;
+    if (!iss) {
+        throw std::runtime_error("PokerGame::set_rng_state failed to parse RNG state");
+    }
+}
+
+std::string PokerGame::get_dealer_rng_state() const {
+    return dealer_.get_rng_state();
+}
+
+void PokerGame::set_dealer_rng_state(const std::string& s) {
+    dealer_.set_rng_state(s);
+}
+
+void PokerGame::set_debug_raw_obs(bool v) {
+    debug_raw_obs_ = v;
+}
+
+bool PokerGame::get_debug_raw_obs() const {
+    return debug_raw_obs_;
 }
 
 // ======================================================================================
@@ -764,37 +812,39 @@ static bool is_straight_possible(const std::vector<Card>& cards) {
 }
 
 static bool is_flush_complete(const std::vector<Card>& cards) {
-    std::unordered_map<int,int> sc;
-    for (auto& c : cards) sc[c.suit]++;
-    for (auto& kv : sc) if (kv.second >= 5) return true;
+    // Aqui "complete" está sendo usado como: board tem 4 cartas do mesmo naipe (perigo de flush).
+    if (cards.size() < 4) return false;
+
+    std::array<int, 4> sc{};
+    for (const auto& c : cards) {
+        if (c.suit >= 0 && c.suit < 4) sc[c.suit] += 1;
+    }
+    for (int s = 0; s < 4; ++s) {
+        if (sc[s] >= 4) return true;
+    }
     return false;
 }
 
 static bool is_straight_complete(const std::vector<Card>& cards) {
-    std::vector<int> r;
-    r.reserve(cards.size());
-    for (auto& c : cards) r.push_back(c.rank);
-    std::sort(r.begin(), r.end());
-    r.erase(std::unique(r.begin(), r.end()), r.end());
+    // Aqui "complete" está sendo usado como: existe run de 4 ranks no board (perigo de straight).
+    // Isso faz sentido no TURN (4 cartas) e no RIVER (5 cartas).
+    if (cards.size() < 4) return false;
 
-    int consec = 1;
-    for (size_t i = 1; i < r.size(); ++i) {
-        if (r[i] == r[i-1] + 1) {
-            consec++;
-            if (consec >= 4) return true;
-        } else {
-            consec = 1;
+    std::array<bool, 15> has{}; // 0..14
+    for (const auto& c : cards) {
+        int r = c.rank; // 2..14 (A=14)
+        if (r >= 2 && r <= 14) has[r] = true;
+    }
+
+    // Ace low support: se tem A, também considere como rank 1 para wheel runs (A234)
+    if (has[14]) has[1] = true;
+
+    // Check any 4-consecutive run
+    for (int start = 1; start <= 11; ++start) { // start..start+3 <= 14
+        if (has[start] && has[start + 1] && has[start + 2] && has[start + 3]) {
+            return true;
         }
     }
-    bool hasA=false,has2=false,has3=false,has4=false,has5=false;
-    for (int x : r) {
-        if (x==14)hasA=true;
-        if (x==2)has2=true;
-        if (x==3)has3=true;
-        if (x==4)has4=true;
-        if (x==5)has5=true;
-    }
-    if (hasA && has2 && has3 && has4 && has5) return true;
     return false;
 }
 
@@ -1335,17 +1385,20 @@ void PokerGame::init_game() {
         players_[i].hand.clear();
     }
 
+    // Safety fallback: never start with zero active players
     if (active.empty()) {
         players_[0].remained_chips = big_blind_ + 2;
         players_[0].status = PlayerStatus::ALIVE;
         active.push_back(0);
     }
 
+    // Ensure dealer is an active seat; if not, sample an active seat.
     if (std::find(active.begin(), active.end(), dealer_id_) == active.end()) {
         std::uniform_int_distribution<int> dist(0, static_cast<int>(active.size()) - 1);
         dealer_id_ = active[dist(rng_)];
     }
 
+    // Deal hole cards only to active players
     for (int r = 0; r < 2; ++r) {
         for (int pid : active) {
             players_[pid].hand.push_back(dealer_.deal_card());
@@ -1359,48 +1412,42 @@ void PokerGame::init_game() {
     history_preflop_.clear();
     history_flop_.clear();
     history_turn_.clear();
+	history_river_.clear();
 
     cur_street_any_action_ = false;
 
+    // ---------------------------------------
+    // Blinds assignment (FIXED for dead seats)
+    // ---------------------------------------
+    int sb_seat = -1;
+    int bb_seat = -1;
+
     if (active.size() == 2) {
-        int sb_seat = dealer_id_;
-        int bb_seat = (active[0] == sb_seat) ? active[1] : active[0];
+        // HU: SB is dealer, BB is the other active seat.
+        sb_seat = dealer_id_;
+        bb_seat = (active[0] == sb_seat) ? active[1] : active[0];
 
-        if (!roles_ok_hu(dealer_id_, active)) {
-            int other = bb_seat;
-            if (roles_ok_hu(other, active)) {
-                dealer_id_ = other;
-                sb_seat = dealer_id_;
-                bb_seat = (active[0] == sb_seat) ? active[1] : active[0];
-            }
-        }
-
-        players_[bb_seat].bet(big_blind_);
-        players_[sb_seat].bet(small_blind_);
-
-        game_pointer_ = sb_seat;
-        // If SB posted all-in blind (or any non-ALIVE), skip to the next ALIVE player.
-        int spins0 = 0;
-        while (spins0 < num_players_ && players_[game_pointer_].status != PlayerStatus::ALIVE) {
-            game_pointer_ = (game_pointer_ + 1) % num_players_;
-            spins0 += 1;
-        }
-
+        // IMPORTANT: do NOT swap dealer based on stack.
+        // In real poker, you can post an all-in blind; position must not depend on stack.
     } else {
-        int s = (dealer_id_ + 1) % num_players_;
-        int b = (dealer_id_ + 2) % num_players_;
-
-        players_[b].bet(big_blind_);
-        players_[s].bet(small_blind_);
-
-        game_pointer_ = (b + 1) % num_players_;
-        int spins1 = 0;
-        while (spins1 < num_players_ && players_[game_pointer_].status != PlayerStatus::ALIVE) {
-            game_pointer_ = (game_pointer_ + 1) % num_players_;
-            spins1 += 1;
-        }
+        // 3+ players: SB is next ALIVE after dealer, BB is next ALIVE after SB.
+        sb_seat = next_alive_player((dealer_id_ + 1) % num_players_);
+        bb_seat = next_alive_player((sb_seat + 1) % num_players_);
     }
 
+    // Post blinds (Player::bet already caps by stack and sets ALLIN when it hits 0).
+    players_[bb_seat].bet(big_blind_);
+    players_[sb_seat].bet(small_blind_);
+
+    // First to act preflop: next ALIVE after BB (works for both HU and 3+ players).
+    game_pointer_ = (bb_seat + 1) % num_players_;
+    int spins = 0;
+    while (spins < num_players_ && players_[game_pointer_].status != PlayerStatus::ALIVE) {
+        game_pointer_ = (game_pointer_ + 1) % num_players_;
+        spins += 1;
+    }
+
+    // Start round with raised_init = each player's in_chips (blinds already posted).
     round_ = Round(num_players_, big_blind_, const_cast<Dealer*>(&dealer_));
     std::vector<int> raised_init(num_players_, 0);
     for (int i = 0; i < num_players_; ++i) raised_init[i] = players_[i].in_chips;
@@ -1408,8 +1455,9 @@ void PokerGame::init_game() {
     round_.start_new_round(players_, game_pointer_, &raised_init);
 
     update_pot();
-	advance_stage_if_needed();
+    advance_stage_if_needed();
 }
+
 
 // ======================================================================================
 // History summaries (v2)
@@ -1649,57 +1697,44 @@ void PokerGame::step(int action) {
     // ----------------------
     // v2: record faced context BEFORE applying the action
     // ----------------------
-    int faced_ctx = -1;
-    {
-        // compute to_call in BB for current player
-        const float bb_val = static_cast<float>(big_blind_);
-        float mx_bet = 0.0f;
-        float my_bet = 0.0f;
-        for (int i = 0; i < 3; ++i) {
-            float b = (bb_val > 0.0f) ? (static_cast<float>(round_.raised[i]) / bb_val) : 0.0f;
-            mx_bet = std::max(mx_bet, b);
-            if (i == game_pointer_) my_bet = b;
-        }
-        const float to_call_bb = std::max(0.0f, mx_bet - my_bet);
+	int faced_ctx = -1;
+	{
+		const int mx = *std::max_element(round_.raised.begin(), round_.raised.end());
+		const int my = round_.raised[game_pointer_];
+		const int amounttocall = std::max(0, mx - my);
 
-        if (stage_ == 0) {
-            // PreflopCtx10 (0..9)
-            faced_ctx = compute_preflop_ctx10(history_preflop_, game_pointer_, dealer_id_);
-        } else {
-            // postflop faced context (0..12), same logic as obs
-            const float pot_bb = (bb_val > 0.0f) ? (static_cast<float>(dealer_.pot) / bb_val) : 0.0f;
-            if (to_call_bb <= 0.0f) {
-                                faced_ctx = (!cur_street_any_action_) ? 0 : 1; // 0 act_first, 1 vs_check
-            } else {
-                float ratio = (pot_bb > 0.0f) ? (to_call_bb / pot_bb) : 999.0f;
-                if (ratio <= 0.40f) faced_ctx = 2;
-                else if (ratio <= 0.60f) faced_ctx = 3;
-                else if (ratio <= 1.10f) faced_ctx = 4;
-                else faced_ctx = 5;
-            }
-            // vs_reraise: approximate by raises count in current street
-            int raises = 0;
-            const auto& hstreet = (stage_==1?history_flop_:(stage_==2?history_turn_:std::vector<std::pair<int,int>>{}));
-            for (auto &pa : hstreet) if (is_aggressive_action_int(pa.second)) raises++;
-            if (raises > 1) faced_ctx = 12;
-        }
-    }
+		int sum_street = 0;
+		for (int i = 0; i < 3; ++i) sum_street += round_.raised[i];
 
-    update_cur_summary_before_action(game_pointer_, faced_ctx, action);
+		int potcommon = dealer_.pot - sum_street; // pot sem as bets da rodada atual
+		if (potcommon < 0) potcommon = 0;
 
-    // History (store the abstract action id 0..6)
-    if (stage_ == 0) history_preflop_.push_back({game_pointer_, action});
-    else if (stage_ == 1) history_flop_.push_back({game_pointer_, action});
-    else if (stage_ == 2) history_turn_.push_back({game_pointer_, action});
+		if (stage_ == 0) {
+			faced_ctx = compute_preflop_ctx10(history_preflop_, game_pointer_, dealer_id_);
+		} else {
+			// POSTFLOP: 0..15 conforme sua regra (chips vs potcommon)
+			faced_ctx = compute_postflop_ctx6(amounttocall, my, potcommon);
+		}
+	}
+
+
+		// ----------------------
+		// IMPORTANT (History v2):
+		// We must first decide the *applied* action (because some branches remap RAISE->CALL or RAISE->ALL_IN).
+		// Only then we:
+		//  1) update_cur_summary_before_action(...)
+		//  2) push into history_*
+		// ----------------------
+
+
 
     // Preflop: map abstract raise labels into BB-based sizings (v2)
     if (stage_ == 0 && (a == ActionType::RAISE_33_POT || a == ActionType::RAISE_HALF_POT || a == ActionType::RAISE_75_POT || a == ActionType::RAISE_POT)) {
         Player& p = players_[game_pointer_];
 
-        // derive preflop state BEFORE applying this action
-        std::vector<std::pair<int,int>> hist_tmp = history_preflop_;
-        if (!hist_tmp.empty()) hist_tmp.pop_back();
-        const auto d = derive_preflop(hist_tmp, game_pointer_, dealer_id_);
+		// derive preflop state BEFORE applying this action
+		const auto d = derive_preflop(history_preflop_, game_pointer_, dealer_id_);
+
 
         const bool unopened = (d.num_actions == 0);
         const bool has_raise = (d.num_raises >= 1);
@@ -1737,41 +1772,93 @@ void PokerGame::step(int action) {
         if (desired_total < min_raise_to) desired_total = min_raise_to;
 
         int q = desired_total - round_.raised[game_pointer_];
-        if (q <= 0) {
-            // fallback: treat as call
-            game_pointer_ = round_.proceed_round(players_, static_cast<int>(ActionType::CHECK_CALL));
-            advance_stage_if_needed();
-            return;
-        }
+		if (q <= 0) {
+			// fallback: treat as call (and record correctly)
+			const int applied_action = static_cast<int>(ActionType::CHECK_CALL);
+
+			update_cur_summary_before_action(game_pointer_, faced_ctx, applied_action);
+			if (stage_ == 0) history_preflop_.push_back({game_pointer_, applied_action});
+			else if (stage_ == 1) history_flop_.push_back({game_pointer_, applied_action});
+			else if (stage_ == 2) history_turn_.push_back({game_pointer_, applied_action});
+
+			game_pointer_ = round_.proceed_round(players_, applied_action);
+			round_.game_pointer = game_pointer_;
+			advance_stage_if_needed();
+			return;
+		}
 
         // Cap by stack (all-in)
-        if (q >= p.remained_chips) {
-            game_pointer_ = round_.proceed_round(players_, static_cast<int>(ActionType::ALL_IN));
-            advance_stage_if_needed();
-            return;
-        }
+		if (q >= p.remained_chips) {
+			const int applied_action = static_cast<int>(ActionType::ALL_IN);
 
-        // Apply custom raise with amount q
+			update_cur_summary_before_action(game_pointer_, faced_ctx, applied_action);
+			if (stage_ == 0) history_preflop_.push_back({game_pointer_, applied_action});
+			else if (stage_ == 1) history_flop_.push_back({game_pointer_, applied_action});
+			else if (stage_ == 2) history_turn_.push_back({game_pointer_, applied_action});
+
+			game_pointer_ = round_.proceed_round(players_, applied_action);
+			round_.game_pointer = game_pointer_;
+			advance_stage_if_needed();
+			return;
+		}
+		
+		// Record v2 summary + history with the *label* action (2..5), since this is a custom-sized raise.
+		const int applied_action = action;
+
+		update_cur_summary_before_action(game_pointer_, faced_ctx, applied_action);
+		if (stage_ == 0) history_preflop_.push_back({game_pointer_, applied_action});
+		else if (stage_ == 1) history_flop_.push_back({game_pointer_, applied_action});
+		else if (stage_ == 2) history_turn_.push_back({game_pointer_, applied_action});
+
+        // ----------------------
+        // Apply custom raise with amount q  (FIXED: sync pointers, skip ALLIN, adjust to_act on all-in raiser)
+        // ----------------------
         round_.raised[game_pointer_] += q;
         p.bet(q);
+
+        // This raise creates exactly one pending response by opponents.
         round_.to_act = 1;
 
         if (p.remained_chips < 0) throw std::runtime_error("Player remained_chips < 0 after custom preflop raise");
         if (p.remained_chips == 0 && p.status != PlayerStatus::FOLDED) p.status = PlayerStatus::ALLIN;
 
-        game_pointer_ = (game_pointer_ + 1) % num_players_;
-        while (players_[game_pointer_].status == PlayerStatus::FOLDED) {
-            game_pointer_ = (game_pointer_ + 1) % num_players_;
+        // If raiser became ALLIN, mirror Round::proceed_round adjustment to avoid double-count in is_over logic.
+        if (p.status == PlayerStatus::ALLIN) {
+            round_.to_act -= 1;
+            if (round_.to_act < 0) round_.to_act = 0;
         }
+
+        // Advance pointer, skipping ANY non-acting player (FOLDED or ALLIN).
+        game_pointer_ = (game_pointer_ + 1) % num_players_;
+        int spins = 0;
+        while (spins < num_players_ && players_[game_pointer_].status != PlayerStatus::ALIVE) {
+            game_pointer_ = (game_pointer_ + 1) % num_players_;
+            spins += 1;
+        }
+
+        // Sync Round pointer with PokerGame pointer.
+        round_.game_pointer = game_pointer_;
 
         advance_stage_if_needed();
         return;
     }
 
-    // Default path (postflop and preflop non-raise)
-    game_pointer_ = round_.proceed_round(players_, action);
-    advance_stage_if_needed();
+		// Default path (postflop and preflop non-raise)
+		{
+			const int applied_action = action;
+
+			update_cur_summary_before_action(game_pointer_, faced_ctx, applied_action);
+			if (stage_ == 0) history_preflop_.push_back({game_pointer_, applied_action});
+			else if (stage_ == 1) history_flop_.push_back({game_pointer_, applied_action});
+			else if (stage_ == 2) history_turn_.push_back({game_pointer_, applied_action});
+		}
+
+		game_pointer_ = round_.proceed_round(players_, action);
+		round_.game_pointer = game_pointer_;
+		advance_stage_if_needed();
+
 }
+
 
 std::vector<float> PokerGame::get_payoffs() const {
     const int N = num_players_;
@@ -2056,6 +2143,75 @@ static inline int clamp_bucket_0_1_2_3p(int x) {
     return 3;
 }
 
+static inline int compute_postflop_ctx6(int amounttocall_chips,
+                                       int mycurrentbet_chips,
+                                       int potcommon_chips) {
+    // 0..15 exatamente como sua classificação (postflop em % do potcommon)
+    // potcommon = pot sem as bets da rodada atual
+
+    // normaliza negativos
+    if (amounttocall_chips < 0) amounttocall_chips = 0;
+    if (mycurrentbet_chips < 0) mycurrentbet_chips = 0;
+
+    // Segurança: se potcommon==0, qualquer % vira ambígua.
+    // Mantemos determinístico:
+    // - para buckets de bet: potcommon=1 só evita divisão por zero e mantém ordem.
+    // - para raises: a classificação é principalmente pelo mycurrentbet*2, então ok.
+    if (potcommon_chips <= 0) potcommon_chips = 1;
+
+    const double p = static_cast<double>(potcommon_chips);
+
+    // -------------------------
+    // 1) Apostas (eu ainda não apostei nesta street)
+    // -------------------------
+    if (mycurrentbet_chips <= 0) {
+        if (amounttocall_chips <= 0) return 0; // nothing_to_call
+
+        const double x = static_cast<double>(amounttocall_chips);
+
+        if (x <= 0.25 * p) return 1;                         // very_low <= 0.25*potcommon
+        if (x >  0.25 * p && x <= 0.45 * p) return 2;        // low (0.25, 0.45]
+        if (x <= 0.70 * p) return 3;                         // normal <= 0.70*potcommon
+        if (x >  0.70 * p && x <= 1.00 * p) return 4;        // high (0.70, 1.00]
+        return 5;                                            // over > 1.00*potcommon
+    }
+
+    // -------------------------
+    // 2) Aumentos (eu apostei e o oponente aumentou)
+    // -------------------------
+    // Sua regra original:
+    // Normal: amounttocall < mycurrentbet*2
+    // Over:   amounttocall > mycurrentbet*2
+    //
+    // Caso empate (==): não existe na regra, mas precisamos escolher um lado para retornar 0..15.
+    // Recomendo tratar empate como NORMAL (não é "maior que 2x").
+    const long long two_x_b = 2LL * static_cast<long long>(mycurrentbet_chips);
+    const bool is_over_raise = (static_cast<long long>(amounttocall_chips) > two_x_b);
+    // (==) cai em Normal por definição acima.
+
+    const double b = static_cast<double>(mycurrentbet_chips);
+
+    // bucket do tamanho da *minha* bet versus potcommon
+    int base = 0;
+    if      (b <= 0.25 * p) base = 0;   // verylowbet
+    else if (b <= 0.45 * p) base = 1;   // lowbet
+    else if (b <= 0.70 * p) base = 2;   // normalbet
+    else if (b <= 1.00 * p) base = 3;   // highbet
+    else                    base = 4;   // overbet (> potcommon)
+
+    // mapeamento final
+    if (!is_over_raise) {
+        // 6..10 (Normal)
+        return 6 + base;
+    } else {
+        // 11..15 (Over)
+        return 11 + base;
+    }
+}
+
+
+
+
 static inline int classify_facing_size_bucket(float to_call_bb) {
     // 0 MNR (<1.5), 1 normal (1.5-3), 2 4x+ (3-5), 3 over (>=5)
     if (to_call_bb < 1.5f) return 0;
@@ -2224,7 +2380,7 @@ std::vector<ActionType> PokerGame::get_legal_actions(int player_id) const {
 }
 
 
-py::dict PokerGame::get_state(int player_id) const {{
+py::dict PokerGame::get_state(int player_id) const {
     update_pot();
 
     const int my_id = player_id;
@@ -2251,13 +2407,13 @@ py::dict PokerGame::get_state(int player_id) const {{
     // Numeric (BB-normalized): stacks(3), current_bets(3), pot, spr-ish (kept v51-compatible)
     // ------------------------------------------------------------
     const float bb_val = static_cast<float>(big_blind_);
-    std::array<float, 3> stacks_vec = {{0,0,0}};
-    std::array<float, 3> current_bets = {{0,0,0}};
+    std::array<float, 3> stacks_vec = {0,0,0};
+    std::array<float, 3> current_bets = {0,0,0};
 
-    for (int i = 0; i < num_players_ && i < 3; ++i) {{
+    for (int i = 0; i < num_players_ && i < 3; ++i) {
         stacks_vec[i] = (bb_val > 0.0f) ? (static_cast<float>(players_[i].remained_chips) / bb_val) : 0.0f;
         current_bets[i] = (bb_val > 0.0f) ? (static_cast<float>(round_.raised[i]) / bb_val) : 0.0f;
-    }}
+    }
 
     for (int i = 0; i < 3; ++i) out[idx++] = stacks_vec[i];
     for (int i = 0; i < 3; ++i) out[idx++] = current_bets[i];
@@ -2273,7 +2429,7 @@ py::dict PokerGame::get_state(int player_id) const {{
     // ------------------------------------------------------------
     // Street one-hot (4)
     // ------------------------------------------------------------
-    std::array<float, 4> street{{}};
+    std::array<float, 4> street{};
     street.fill(0.0f);
     if (0 <= stage_ && stage_ < 4) street[stage_] = 1.0f;
     for (int i = 0; i < 4; ++i) out[idx++] = street[i];
@@ -2314,12 +2470,12 @@ py::dict PokerGame::get_state(int player_id) const {{
     float eff_stack = 0.0f;
     bool eff_init = false;
     int num_active = 0;
-    for (int i = 0; i < num_players_ && i < 3; ++i) {{
+    for (int i = 0; i < num_players_ && i < 3; ++i) {
         if (is_dead_seat_v50_style(players_[i]) || players_[i].remained_chips <= 0) continue;
         num_active++;
-        if (!eff_init) {{ eff_stack = stacks_vec[i]; eff_init = true; }}
+        if (!eff_init) { eff_stack = stacks_vec[i]; eff_init = true; }
         else eff_stack = std::min(eff_stack, stacks_vec[i]);
-    }}
+    }
     if (!eff_init) eff_stack = hero_stack;
 
     float spr = eff_stack / (pot_val + 1e-5f);
@@ -2341,17 +2497,17 @@ py::dict PokerGame::get_state(int player_id) const {{
     int bets_this_street = 0;
     int raises_this_street = 0;
     bool seen_aggr = false;
-    if (hstreet) {{
-        for (const auto& pa : *hstreet) {{
+    if (hstreet) {
+        for (const auto& pa : *hstreet) {
             int a = pa.second;
             if (a < 0 || a > 6) continue;
-            if (is_aggressive_action_int(a)) {{
+            if (is_aggressive_action_int(a)) {
                 bets_this_street++;
                 if (seen_aggr) raises_this_street++;
                 seen_aggr = true;
-            }}
-        }}
-    }}
+            }
+        }
+    }
     int raises_cap = clamp_bucket_0_1_2_3p(raises_this_street);
     int bets_cap = clamp_bucket_0_1_2_3p(bets_this_street);
 
@@ -2364,10 +2520,10 @@ py::dict PokerGame::get_state(int player_id) const {{
     out[idx++] = static_cast<float>(bets_cap);
 
     // Postflop action index (13)
-    std::array<float, 13> post_ai{{}};
+    std::array<float, 13> post_ai{};
     post_ai.fill(0.0f);
 
-    if (stage_ >= 1) {{
+    if (stage_ >= 1) {
         // postflop classification (heuristic approximation of your OPPL index)
         const bool is_first_action_round = (!hstreet || hstreet->empty());
         const bool vs_check = (to_call_bb <= 1e-6f) && !is_first_action_round;
@@ -2375,33 +2531,33 @@ py::dict PokerGame::get_state(int player_id) const {{
 
         bool hero_did_aggr = false;
         float hero_last_aggr_bb = 0.0f;
-        if (hstreet) {{
-            for (const auto& pa : *hstreet) {{
+        if (hstreet) {
+            for (const auto& pa : *hstreet) {
                 if (pa.first != my_id) continue;
                 int a = pa.second;
                 if (a < 0 || a > 6) continue;
-                if (is_aggressive_action_int(a)) {{
+                if (is_aggressive_action_int(a)) {
                     hero_did_aggr = true;
                     hero_last_aggr_bb = std::max(hero_last_aggr_bb, my_bet);
-                }}
-            }}
-        }}
+                }
+            }
+        }
 
-        if (is_first_action_round) {{
+        if (is_first_action_round) {
             post_ai[0] = 1.0f; // act_first
-        }} else if (vs_check) {{
+        } else if (vs_check) {
             post_ai[1] = 1.0f; // vs_check
-        }} else if (!hero_did_aggr && !vs_reraise) {{
+        } else if (!hero_did_aggr && !vs_reraise) {
             // facing a bet
             float r = to_call_over_pot;
             if (r <= 0.40f) post_ai[2] = 1.0f;
             else if (r <= 0.60f) post_ai[3] = 1.0f;
             else if (r <= 1.10f) post_ai[4] = 1.0f;
             else post_ai[5] = 1.0f;
-        }} else {{
-            if (vs_reraise) {{
+        } else {
+            if (vs_reraise) {
                 post_ai[12] = 1.0f; // vs_reraise
-            }}
+            }
 
             float bet_ratio = hero_last_aggr_bb / (pot_val + 1e-5f);
             int hero_b = 0;
@@ -2410,25 +2566,25 @@ py::dict PokerGame::get_state(int player_id) const {{
             else hero_b = 2;
 
             bool raise_is_over = (to_call_bb > (hero_last_aggr_bb * 2.0f));
-            if (!raise_is_over) {{
+            if (!raise_is_over) {
                 if (hero_b == 0) post_ai[6] = 1.0f;
                 else if (hero_b == 1) post_ai[7] = 1.0f;
                 else post_ai[8] = 1.0f;
-            }} else {{
+            } else {
                 if (hero_b == 0) post_ai[9] = 1.0f;
                 else if (hero_b == 1) post_ai[10] = 1.0f;
                 else post_ai[11] = 1.0f;
-            }}
-        }}
-    }}
+            }
+        }
+    }
 
     for (int i = 0; i < 13; ++i) out[idx++] = post_ai[i];
 
     // Preflop categorical (31)
-    std::array<float, 31> pre_ctx{{}};
+    std::array<float, 31> pre_ctx{};
     pre_ctx.fill(0.0f);
 
-    if (stage_ == 0) {{
+    if (stage_ == 0) {
         int pos = pos_bucket_btn_sb_bb(my_id, dealer_id_);
         pre_ctx[pos] = 1.0f; // [0..2]
 
@@ -2459,24 +2615,24 @@ py::dict PokerGame::get_state(int player_id) const {{
         pre_ctx[16 + hp] = 1.0f;
 
         int lrp = 3; // none
-        if (d.last_raiser >= 0) {{
+        if (d.last_raiser >= 0) {
             int ppos = pos_bucket_btn_sb_bb(d.last_raiser, dealer_id_);
             if (ppos == 0) lrp = 0;
             else if (ppos == 1) lrp = 1;
             else lrp = 2;
-        }}
+        }
         pre_ctx[23 + lrp] = 1.0f;
 
         pre_ctx[27] = (unopened ? 1.0f : 0.0f);
         pre_ctx[28] = (d.got_isolated ? 1.0f : 0.0f);
 
         bool facing_limp_raise = false;
-        if (to_call_bb > 1e-6f && d.limp_raised) {{
+        if (to_call_bb > 1e-6f && d.limp_raised) {
             if (d.last_raiser == d.first_limper && d.iso_raiser == my_id) facing_limp_raise = true;
-        }}
+        }
         pre_ctx[29] = (facing_limp_raise ? 1.0f : 0.0f);
         pre_ctx[30] = (d.num_raises >= 3 ? 1.0f : 0.0f);
-    }}
+    }
 
     for (int i = 0; i < 31; ++i) out[idx++] = pre_ctx[i];
 
@@ -2484,18 +2640,18 @@ py::dict PokerGame::get_state(int player_id) const {{
     // legal_mask[0..6] 0/1 aligned with: 0 fold, 1 check/call, 2 bet33, 3 bet50, 4 bet75, 5 bet_pot, 6 all-in
     // ------------------------------------------------------------
     auto legal = get_legal_actions(player_id);
-    std::array<float, 7> legal_mask{{}};
+    std::array<float, 7> legal_mask{};
     legal_mask.fill(0.0f);
 
     py::dict legal_dict;
     py::list raw_legal;
-    for (auto a : legal) {{
+    for (auto a : legal) {
         int ai = static_cast<int>(a);
         if (ai < 0 || ai > 6) continue;
         legal_mask[ai] = 1.0f;
         legal_dict[py::int_(ai)] = py::none();
         raw_legal.append(py::int_(ai));
-    }}
+    }
     // ------------------------------------------------------------
     // History v2 (96) built from per-player street summaries
     // ------------------------------------------------------------
@@ -2559,10 +2715,10 @@ py::dict PokerGame::get_state(int player_id) const {{
 
     py::list chips_list;
     py::list stacks_list;
-    for (int i = 0; i < num_players_; ++i) {{
+    for (int i = 0; i < num_players_; ++i) {
         chips_list.append(py::int_(players_[i].in_chips));
         stacks_list.append(py::int_(players_[i].remained_chips));
-    }}
+    }
 
     raw_obs["hand"] = hand_list;
     raw_obs["public_cards"] = pub_list;
@@ -2588,10 +2744,10 @@ py::dict PokerGame::get_state(int player_id) const {{
     state["obs"] = obs;
     state["legal_actions"] = legal_dict;
     state["raw_legal_actions"] = raw_legal;
-    state["raw_obs"] = raw_obs;
+    if (debug_raw_obs_) state["raw_obs"] = raw_obs;
     state["current_player"] = py::int_(game_pointer_);
     return state;
-}}
+}
 
 
 // ======================================================================================
@@ -2608,14 +2764,16 @@ PYBIND11_MODULE(cpoker, m) {
     py::class_<PokerGame, std::unique_ptr<PokerGame>>(m, "PokerGame")
         .def(py::init<int, uint64_t>())
         .def("set_seed", &PokerGame::set_seed)
-        .def("reset", &PokerGame::reset, py::arg("stacks"), py::arg("dealer_id"), py::arg("small_blind"), py::arg("big_blind"))
+        .def("reset", &PokerGame::reset,
+             py::arg("stacks"), py::arg("dealer_id"), py::arg("small_blind"), py::arg("big_blind"))
         .def("step", &PokerGame::step, py::arg("action"))
         .def("get_legal_actions", &PokerGame::get_legal_actions, py::arg("player_id"))
         .def("get_state", &PokerGame::get_state, py::arg("player_id"))
         .def("get_payoffs", &PokerGame::get_payoffs)
         .def("is_over", &PokerGame::is_over)
-        .def("get_game_pointer", [](const PokerGame& g) { return g.get_player_id(); })
-        .def("get_player_id", &PokerGame::get_player_id)
+        .def("get_player_id", &PokerGame::get_player_id)       // quem age agora (ou -1)
+        .def("get_game_pointer", &PokerGame::get_game_pointer) // ponteiro interno atual
         .def("clone", &PokerGame::clone);
-
 }
+
+

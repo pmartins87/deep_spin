@@ -6,8 +6,10 @@
 #include <utility>
 #include <vector>
 #include <memory>
-#include <random>                      // ✅ necessário
+#include <random>
+#include <array>                       // ✅ necessário (done_, cur_)
 #include <pybind11/pybind11.h>         // ✅ necessário (pybind11::dict)
+#include <sstream>   // ✅ para serializar RNG state
 
 namespace poker {
 
@@ -56,7 +58,7 @@ struct Dealer {
     void reset();
     Card deal_card();
 
-    // ✅ checkpoint
+    // ✅ checkpoint (determinismo do RNG do Dealer)
     std::string get_rng_state() const;
     void set_rng_state(const std::string& s);
 
@@ -96,15 +98,19 @@ public:
     void reset(const std::vector<int>& stacks, int dealer_id, int small_blind, int big_blind);
     void step(int action);
 
-	std::unique_ptr<PokerGame> clone() const;
+    std::unique_ptr<PokerGame> clone() const;
+
     bool is_over() const;
     int get_player_id() const;
+
+    // ✅ exportado no PYBIND11_MODULE, então tem que existir:
+    int get_game_pointer() const { return game_pointer_; }
 
     std::vector<ActionType> get_legal_actions(int player_id) const;
     pybind11::dict get_state(int player_id) const;
     std::vector<float> get_payoffs() const;
 
-    // ✅ NOVO: checkpoints perfeitos
+    // ✅ checkpoints perfeitos (RNG interno do PokerGame e do Dealer)
     std::string get_rng_state() const;
     void set_rng_state(const std::string& s);
 
@@ -136,14 +142,11 @@ private:
     std::vector<std::pair<int,int>> history_preflop_;
     std::vector<std::pair<int,int>> history_flop_;
     std::vector<std::pair<int,int>> history_turn_;
+    std::vector<std::pair<int,int>> history_river_;
 
     // ==================================================================================
     // History summaries (v2)
-    // ----------------------------------------------------------------------------------
-    // We want previous-street context to be usable on later streets (esp. river).
-    // So we store, per street, what the hero was facing when he acted (ctx),
-    // what the hero actually did (action), whether hero acted first, and light
-    // street counters (bets/raises), all stored deterministically in the env.
+    // ==================================================================================
     struct StreetSummary {
         int hero_faced_ctx = -1;     // preflop: 0..9, postflop: 0..12, -1 if hero never acted
         int hero_last_action = -1;   // 0..6
@@ -161,16 +164,14 @@ private:
     // completed summaries for streets: 0 preflop, 1 flop, 2 turn
     // per player (max 3 players)
     std::array<std::array<StreetSummary, 3>, 3> done_;
-    // current current street summary (stage_ 0..3) per player
+    // current street summary per player
     std::array<StreetSummary, 3> cur_;
     bool cur_street_any_action_ = false;
 
     void reset_summaries();
     void on_street_ended(int ended_stage);
 
-    // ==================================================================================
     // Helpers
-    // ==================================================================================
     void update_cur_summary_before_action(int acting_player, int faced_ctx, int action_int);
 
     mutable std::mt19937_64 rng_;
