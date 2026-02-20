@@ -1,4 +1,5 @@
 // poker_env.h
+// v52 – Rewritten observation layout (292 dims) per Minuta das Dimensões.
 #pragma once
 
 #include <cstdint>
@@ -7,9 +8,9 @@
 #include <vector>
 #include <memory>
 #include <random>
-#include <array>                       // ✅ necessário (done_, cur_)
-#include <pybind11/pybind11.h>         // ✅ necessário (pybind11::dict)
-#include <sstream>   // ✅ para serializar RNG state
+#include <array>
+#include <pybind11/pybind11.h>
+#include <sstream>
 
 namespace poker {
 
@@ -32,8 +33,8 @@ enum class ActionType : int {
 };
 
 struct Card {
-    int rank;
-    int suit;
+    int rank;   // 2..14 (A=14)
+    int suit;   // 0..3  (S=0, H=1, D=2, C=3)
     int index() const;
     std::string to_str() const;
 };
@@ -58,7 +59,6 @@ struct Dealer {
     void reset();
     Card deal_card();
 
-    // ✅ checkpoint (determinismo do RNG do Dealer)
     std::string get_rng_state() const;
     void set_rng_state(const std::string& s);
 
@@ -103,21 +103,18 @@ public:
     bool is_over() const;
     int get_player_id() const;
 
-    // ✅ exportado no PYBIND11_MODULE, então tem que existir:
     int get_game_pointer() const { return game_pointer_; }
 
     std::vector<ActionType> get_legal_actions(int player_id) const;
     pybind11::dict get_state(int player_id) const;
     std::vector<float> get_payoffs() const;
 
-    // ✅ checkpoints perfeitos (RNG interno do PokerGame e do Dealer)
     std::string get_rng_state() const;
     void set_rng_state(const std::string& s);
 
     std::string get_dealer_rng_state() const;
     void set_dealer_rng_state(const std::string& s);
 
-    // ✅ raw_obs desligado por padrão
     void set_debug_raw_obs(bool v);
     bool get_debug_raw_obs() const;
 
@@ -145,19 +142,14 @@ private:
     std::vector<std::pair<int,int>> history_river_;
 
     // ==================================================================================
-    // History summaries (v2)
+    // History summaries (v52 – simplified per Minuta)
     // ==================================================================================
     struct StreetSummary {
         int hero_faced_ctx = -1;     // preflop: 0..9, postflop: 0..12, -1 if hero never acted
-        int hero_last_action = -1;   // 0..6
-        int hero_action_count = 0;   // capped in encoding
-        int hero_acted_first = 0;    // 0/1
-        int bets = 0;                // aggressive actions count
-        int raises = 0;              // raises beyond first aggression
-        int any_action = 0;          // whether any non-blind action happened on this street
+        int aggressor_flag = 0;      // 1 if hero was the aggressor on this street
         void reset() {
-            hero_faced_ctx = -1; hero_last_action = -1; hero_action_count = 0;
-            hero_acted_first = 0; bets = 0; raises = 0; any_action = 0;
+            hero_faced_ctx = -1;
+            aggressor_flag = 0;
         }
     };
 
@@ -176,7 +168,7 @@ private:
 
     mutable std::mt19937_64 rng_;
 
-    bool debug_raw_obs_ = false; // ✅ default OFF
+    bool debug_raw_obs_ = false;
 
     void init_game();
     void update_pot() const;
