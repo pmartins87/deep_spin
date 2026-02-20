@@ -1,0 +1,9 @@
+# DeepSpin v60 – enforce consistent LF in repo
+* text=auto eol=lf
+
+*.py  text eol=lf
+*.cpp text eol=lf
+*.h   text eol=lf
+*.md  text eol=lf
+*.txt text eol=lf
+*.bat text eol=crlf
