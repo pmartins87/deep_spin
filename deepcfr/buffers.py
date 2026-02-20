@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 @dataclass
 class ReservoirConfig:
-    obs_dim: int = 260
+    obs_dim: int = 292
     num_actions: int = 7
     capacity: int = 2_000_000
     dtype: str = "float32"

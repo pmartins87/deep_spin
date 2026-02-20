@@ -1,7 +1,7 @@
 // poker_env.cpp
-// v52 – Rewritten observation layout (292 dims) per Minuta das Dimensões,
-//       Minuta Hand Strength (40-dim one-hot) and Minuta Draws (12-dim multi-hot).
-// Engine (Card, Player, Dealer, Round, step, payoffs) kept from v51.
+// DeepSpin v60 – Observation layout (292 dims) per Minuta das Dimensões,
+//               Hand Strength (40-dim one-hot) and Draws (12-dim multi-hot).
+// Engine (Card, Player, Dealer, Round, step, payoffs) preserved from baseline.
 
 #include "poker_env.h"
 
@@ -40,7 +40,7 @@ namespace py = pybind11;
 namespace poker {
 
 // ======================================================================================
-// OBS LAYOUT (v52)
+// OBS LAYOUT (v60)
 // ======================================================================================
 //  #1  Cards:                  104  [  0 .. 103]
 //  #2  Numeric:                 20  [104 .. 123]
@@ -97,7 +97,7 @@ static inline int card_index(int rank, int suit) {
     return suit * 13 + (rank - 2);
 }
 
-static inline bool is_dead_seat_v50_style(const Player& p) {
+static inline bool is_dead_seat(const Player& p) {
     return (p.status == PlayerStatus::FOLDED) &&
            (p.remained_chips == 0) &&
            (p.in_chips == 0) &&
@@ -218,7 +218,7 @@ bool PokerGame::get_debug_raw_obs() const {
 }
 
 // ======================================================================================
-// Round (faithful to v50/v51 round.py semantics)
+// Round (faithful to baseline round semantics)
 // ======================================================================================
 
 Round::Round(int num_players_, int init_raise_amount_, Dealer* dealer_)
@@ -441,7 +441,7 @@ bool Round::is_over(const std::vector<Player>& players) const {
 }
 
 // ======================================================================================
-// 7-card hand evaluator for payoffs (unchanged from v51)
+// 7-card hand evaluator for payoffs (unchanged from baseline)
 // ======================================================================================
 
 struct HandRank {
@@ -589,7 +589,7 @@ static std::array<float, 52> one_hot_cards(const std::vector<Card>& cards) {
 }
 
 // ======================================================================================
-// Feature: Position scenario (11 dims) – unchanged from v51
+// Feature: Position scenario (11 dims) – unchanged from baseline
 // ======================================================================================
 
 static std::array<float, 11> get_position_scenario(
@@ -639,7 +639,7 @@ static std::array<float, 11> get_position_scenario(
 
     // Heads-up
     if (num_active == 2) {
-        const bool game_is_hu = (folded_id >= 0) ? is_dead_seat_v50_style(players[folded_id]) : false;
+        const bool game_is_hu = (folded_id >= 0) ? is_dead_seat(players[folded_id]) : false;
 
         if (game_is_hu) {
             if (my_id == dealer_id) vec[0] = 1.0f; // HUSB
@@ -1663,7 +1663,7 @@ static inline int player_preflop_pos_bucket(int player_id, int dealer_id) {
 }
 
 // ======================================================================================
-// PreflopDerived (unchanged from v51)
+// PreflopDerived (unchanged from baseline)
 // ======================================================================================
 
 struct PreflopDerived {
@@ -1872,7 +1872,7 @@ static inline int compute_postflop_ctx13(int amounttocall_chips,
 }
 
 // ======================================================================================
-// PokerGame constructors, copy/move, clone (unchanged from v51)
+// PokerGame constructors, copy/move, clone (unchanged from baseline)
 // ======================================================================================
 
 PokerGame::PokerGame(const PokerGame& other)
@@ -2046,7 +2046,7 @@ void PokerGame::update_pot() const {
 }
 
 // ======================================================================================
-// History summaries (v52 – simplified)
+// History summaries (v60 – simplified per Minuta)
 // ======================================================================================
 
 void PokerGame::reset_summaries() {
@@ -2084,7 +2084,7 @@ void PokerGame::update_cur_summary_before_action(int acting_player, int faced_ct
 }
 
 // ======================================================================================
-// init_game (unchanged from v51)
+// init_game (unchanged from baseline)
 // ======================================================================================
 
 void PokerGame::init_game() {
@@ -2279,7 +2279,7 @@ void PokerGame::advance_stage_if_needed() {
 }
 
 // ======================================================================================
-// step (unchanged from v51 except history_river_ recording)
+// step (unchanged from baseline except history_river_ recording)
 // ======================================================================================
 
 void PokerGame::step(int action) {
@@ -2435,7 +2435,7 @@ void PokerGame::step(int action) {
 }
 
 // ======================================================================================
-// get_payoffs (unchanged from v51)
+// get_payoffs (unchanged from baseline)
 // ======================================================================================
 
 std::vector<float> PokerGame::get_payoffs() const {
@@ -2533,7 +2533,7 @@ std::vector<float> PokerGame::get_payoffs() const {
 }
 
 // ======================================================================================
-// get_legal_actions (unchanged from v51)
+// get_legal_actions (unchanged from baseline)
 // ======================================================================================
 
 std::vector<ActionType> PokerGame::get_legal_actions(int player_id) const {
@@ -2716,7 +2716,7 @@ py::dict PokerGame::get_state(int player_id) const {
     float min_total_bb = 1e9f;
     for (int i = 0; i < num_players_ && i < 3; ++i) {
         if (players_[i].status == PlayerStatus::FOLDED) {
-            if (!is_dead_seat_v50_style(players_[i])) num_folded++;
+            if (!is_dead_seat(players_[i])) num_folded++;
             continue;
         }
         num_active++;
@@ -3037,7 +3037,7 @@ py::dict PokerGame::get_state(int player_id) const {
 PYBIND11_MODULE(cpoker, m) {
     using poker::PokerGame;
 
-    m.doc() = "Spin&Go NoLimitHoldem env (v52 C++), 292-dim observation layout";
+    m.doc() = "Spin&Go NoLimitHoldem env (v60 C++), 292-dim observation layout";
 
     py::class_<PokerGame, std::unique_ptr<PokerGame>>(m, "PokerGame")
         .def(py::init<int, uint64_t>())

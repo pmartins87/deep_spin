@@ -8,7 +8,7 @@ NUM_ACTIONS = 7
 
 # OBS_DIM must match the C++ environment's obs vector length.
 # `scripts/train_deepcfr.py` should set SPIN_OBS_DIM before importing deepcfr.*.
-OBS_DIM = int(os.environ.get("SPIN_OBS_DIM", "338"))
+OBS_DIM = int(os.environ.get("SPIN_OBS_DIM", "292"))
 
 # One-time log to confirm whether we are using fast clone-based traversal.
 _CLONE_LOGGED = False

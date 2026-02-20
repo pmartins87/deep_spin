@@ -20,7 +20,7 @@ class MLP(nn.Module):
 
 class AdvantageNet(nn.Module):
     """
-    Entrada: obs (B, 260)
+    Entrada: obs (B, 292)
     Saída: advantage (B, 7)
 
     Importante:
@@ -32,7 +32,7 @@ class AdvantageNet(nn.Module):
         if obs_dim is None:
             # Fallback so code still runs if the caller forgets to pass obs_dim.
             # Prefer passing explicit obs_dim from the trainer.
-            obs_dim = int(os.environ.get("SPIN_OBS_DIM", "260"))
+            obs_dim = int(os.environ.get("SPIN_OBS_DIM", "292"))
         if hidden is None:
             hidden = [1024, 1024, 512, 512]
         self.mlp = MLP(obs_dim, hidden, num_actions)
@@ -57,7 +57,7 @@ class PolicyNet(nn.Module):
     def __init__(self, obs_dim: int | None = None, num_actions: int = 7, hidden: list[int] | None = None):
         super().__init__()
         if obs_dim is None:
-            obs_dim = int(os.environ.get("SPIN_OBS_DIM", "260"))
+            obs_dim = int(os.environ.get("SPIN_OBS_DIM", "292"))
         if hidden is None:
             hidden = [1024, 512, 512]
         self.mlp = MLP(obs_dim, hidden, num_actions)

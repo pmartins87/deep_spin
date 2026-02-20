@@ -1,5 +1,5 @@
 // poker_env.h
-// v52 – Rewritten observation layout (292 dims) per Minuta das Dimensões.
+// v60 – Rewritten observation layout (292 dims) per Minuta das Dimensões.
 #pragma once
 
 #include <cstdint>
@@ -142,7 +142,7 @@ private:
     std::vector<std::pair<int,int>> history_river_;
 
     // ==================================================================================
-    // History summaries (v52 – simplified per Minuta)
+    // History summaries (v60 – simplified per Minuta)
     // ==================================================================================
     struct StreetSummary {
         int hero_faced_ctx = -1;     // preflop: 0..9, postflop: 0..12, -1 if hero never acted
