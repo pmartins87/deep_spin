@@ -72,6 +72,11 @@ struct Round {
     std::vector<int> raised;
     int game_pointer;
     int to_act;
+
+    // B016: tamanho mínimo do próximo raise (regra de min-raise no-limit).
+    // Inicializa em init_raise_amount (BB) no início de cada betting round.
+    int last_raise_size;
+
     Dealer* dealer;
 
     Round(int num_players_, int init_raise_amount_, Dealer* dealer_);

@@ -59,9 +59,10 @@ def _load_config_yaml_or_json(path: Path) -> dict:
         return {}
 
 
-def ensure_dirs() -> None:
-    (PROJECT_ROOT / "checkpoints").mkdir(parents=True, exist_ok=True)
-    (PROJECT_ROOT / "logs").mkdir(parents=True, exist_ok=True)
+def ensure_dirs(base_dir: Path | None = None) -> None:
+    base = base_dir if base_dir is not None else PROJECT_ROOT
+    (base / "checkpoints").mkdir(parents=True, exist_ok=True)
+    (base / "logs").mkdir(parents=True, exist_ok=True)
 
 
 def rotate_incompatible_path(path: Path, reason: str) -> None:
@@ -132,7 +133,16 @@ class TrainCfg:
 
     base_seed: int = 123
     log_every: int = 5
-    save_every: int = 25
+    
+    # B034: Warm-up, não grava buffers nas primeiras iterações
+    warmup_iters: int = 10
+    skip_saves_during_warmup: bool = True   
+
+    # B019: Salvar por tempo, reduz overhead de IO.
+    # - save_every: mantém compatibilidade (0 desativa)
+    # - save_every_seconds: intervalo por tempo (8h default)
+    save_every: int = 0
+    save_every_seconds: int = 8 * 60 * 60
 
     rollout_workers: int = 24
     worker_threads: int = 1
@@ -141,7 +151,7 @@ class TrainCfg:
     deterministic_merge: bool = True
     bitwise: bool = True
 
-    ckpt_dir: Path = (PROJECT_ROOT / "checkpoints")
+    ckpt_dir: Path = (PROJECT_ROOT / "checkpoints")  # pode ser sobrescrito no main() via RUN_DIR
 
     @property
     def ckpt_path(self) -> Path:
@@ -198,6 +208,36 @@ def try_restore_all(trainer, cfg: TrainCfg) -> None:
             rotate_incompatible_folder(cfg.buffers_dir, "buffers_restore_failed")
             print(f"[WARN] Restore dos buffers falhou: {type(e).__name__}: {e}, buffers resetados.")
 
+def _sanitize_policy_targets(legal: "np.ndarray", target: "np.ndarray") -> "np.ndarray":
+    """
+    Garante que target da policy:
+      - zera ações ilegais,
+      - renormaliza para somar 1 dentro das ações legais,
+      - evita NaN/inf.
+    """
+    import numpy as np
+
+    t = np.asarray(target, dtype=np.float32, copy=True)
+    l = np.asarray(legal, dtype=np.float32, copy=False)
+
+    # zera ilegais
+    t *= l
+
+    # trata NaN/inf
+    t = np.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # renormaliza por linha
+    s = t.sum(axis=1, keepdims=True)
+    # se linha zerou, volta para uniforme nas legais
+    bad = (s <= 0.0)
+    if np.any(bad):
+        cnt = l.sum(axis=1, keepdims=True)
+        cnt = np.maximum(cnt, 1.0)
+        t[bad[:, 0]] = l[bad[:, 0]] / cnt[bad[:, 0]]
+        s = t.sum(axis=1, keepdims=True)
+
+    t /= np.maximum(s, 1e-12)
+    return t
 
 def _buffer_add_many(buf, obs, legal, target, pid) -> int:
     n = int(obs.shape[0])
@@ -236,6 +276,105 @@ def _safe_batch_size(requested: int, available: int, min_bs: int = 1024) -> int:
         return 0
     return max(min_bs, min(int(requested), int(available)))
 
+def _sample_adv_target_stats(buf, n: int = 8192):
+    import numpy as np
+    sz = _buffer_size(buf)
+    if sz <= 0:
+        return None
+    b = int(min(n, sz))
+    _, legal, target, _ = buf.sample_batch(b)
+    legal = np.asarray(legal, dtype=np.float32)
+    target = np.asarray(target, dtype=np.float32)
+
+    t = np.abs(target * legal).reshape(-1)
+    if t.size == 0:
+        return None
+
+    naninf = bool(np.isnan(t).any() or np.isinf(t).any())
+    t = np.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
+
+    return {
+        "abs_p50": float(np.percentile(t, 50)),
+        "abs_p95": float(np.percentile(t, 95)),
+        "abs_p99": float(np.percentile(t, 99)),
+        "naninf": naninf,
+    }
+
+
+def _sample_pol_entropy(buf, n: int = 8192):
+    import numpy as np
+    sz = _buffer_size(buf)
+    if sz <= 0:
+        return None
+    b = int(min(n, sz))
+    _, legal, target, _ = buf.sample_batch(b)
+    legal = np.asarray(legal, dtype=np.float32)
+    target = np.asarray(target, dtype=np.float32)
+
+    t = target * legal
+    t = np.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
+
+    s = t.sum(axis=1, keepdims=True)
+    bad = (s <= 0.0)
+    if np.any(bad):
+        cnt = legal.sum(axis=1, keepdims=True)
+        cnt = np.maximum(cnt, 1.0)
+        t[bad[:, 0]] = legal[bad[:, 0]] / cnt[bad[:, 0]]
+        s = t.sum(axis=1, keepdims=True)
+
+    t = t / np.maximum(s, 1e-12)
+    naninf = bool(np.isnan(t).any() or np.isinf(t).any())
+
+    ent = -(t * np.log(np.maximum(t, 1e-12))).sum(axis=1)
+    return {
+        "entropy_mean": float(ent.mean()),
+        "entropy_p05": float(np.percentile(ent, 5)),
+        "entropy_p50": float(np.percentile(ent, 50)),
+        "naninf": naninf,
+    }
+    
+def _sample_policy_action_support(buf, n: int = 8192):
+    """
+    Para cada ação a:
+      - count_legal[a] = quantas vezes a ação estava legal (no batch amostrado)
+      - mean_prob[a] = média do target_prob[a] apenas nos estados onde legal[a]==1
+    """
+    import numpy as np
+    sz = _buffer_size(buf)
+    if sz <= 0:
+        return None
+
+    b = int(min(n, sz))
+    _, legal, target, _ = buf.sample_batch(b)
+    legal = np.asarray(legal, dtype=np.float32)
+    target = np.asarray(target, dtype=np.float32)
+
+    # sanitiza rapidamente (igual B011, mas sem dependência)
+    t = target * legal
+    t = np.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
+    s = t.sum(axis=1, keepdims=True)
+    bad = (s <= 0.0)
+    if np.any(bad):
+        cnt = np.maximum(legal.sum(axis=1, keepdims=True), 1.0)
+        t[bad[:, 0]] = legal[bad[:, 0]] / cnt[bad[:, 0]]
+        s = t.sum(axis=1, keepdims=True)
+    t = t / np.maximum(s, 1e-12)
+
+    num_actions = t.shape[1]
+    count_legal = legal.sum(axis=0)  # (A,)
+    mean_prob = np.zeros((num_actions,), dtype=np.float32)
+
+    for a in range(num_actions):
+        m = legal[:, a] > 0.0
+        if np.any(m):
+            mean_prob[a] = float(t[m, a].mean())
+        else:
+            mean_prob[a] = 0.0
+
+    return {
+        "count_legal": count_legal.astype(np.int64).tolist(),
+        "mean_prob": mean_prob.tolist(),
+    }
 
 def _fmt_action_dist(counts):
     total = sum(int(x) for x in counts)
@@ -250,7 +389,10 @@ def _fmt_action_dist(counts):
 
 
 def main() -> None:
-    ensure_dirs()
+    # B043: permite isolar execuções (verificadores) em um diretório próprio
+    _run_dir = os.environ.get("RUN_DIR", "").strip()
+    base_dir = Path(_run_dir) if _run_dir else PROJECT_ROOT
+    ensure_dirs(base_dir=base_dir)
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=None)
@@ -260,9 +402,15 @@ def main() -> None:
     ap.add_argument("--main_threads", type=int, default=None)
     ap.add_argument("--deterministic_merge", type=int, default=1)
     ap.add_argument("--bitwise", type=int, default=1)
+
+    # B042: permite limitar o treino para verificadores (resume integrity)
+    ap.add_argument("--max_iters", type=int, default=None)
+
     args = ap.parse_args()
 
     cfg = TrainCfg()
+    # B043: redireciona checkpoints/logs quando RUN_DIR estiver definido
+    cfg.ckpt_dir = base_dir / "checkpoints"
     if args.workers is not None:
         cfg.rollout_workers = int(args.workers)
     if args.traversals is not None:
@@ -275,12 +423,23 @@ def main() -> None:
         cfg.main_torch_threads = int(args.main_threads)
     cfg.deterministic_merge = bool(int(args.deterministic_merge))
     cfg.bitwise = bool(int(args.bitwise))
+    # B042: max iters via CLI (para verificadores)
+    if args.max_iters is not None:
+        cfg.iterations = int(args.max_iters)
+
+    # B042: override por ambiente (para verify_resume_integrity.py)
+    _env_max = os.environ.get("MAX_ITERS_OVERRIDE", "").strip()
+    if _env_max:
+        try:
+            cfg.iterations = int(_env_max)
+        except Exception:
+            pass
 
     # bitwise => single-thread no treino
     if cfg.bitwise:
         cfg.main_torch_threads = 1
 
-    fault_path = PROJECT_ROOT / "logs" / "fault.log"
+    fault_path = base_dir / "logs" / "fault.log"
     with open(fault_path, "w", encoding="utf-8") as ff:
         faulthandler.enable(file=ff, all_threads=True)
 
@@ -318,6 +477,7 @@ def main() -> None:
         from deepcfr.buffers import ReservoirBuffer, ReservoirConfig
         from deepcfr.networks import AdvantageNet, PolicyNet
         from deepcfr.scenario import ScenarioSampler, choose_dealer_id_for_episode
+        
         # Audit: garante que o arquivo scenario.py importado é o correto (evita versão simplificada/errada)
         try:
             import deepcfr.scenario as scenario_mod
@@ -340,8 +500,8 @@ def main() -> None:
             f"main_threads={cfg.main_torch_threads}, deterministic_merge={int(cfg.deterministic_merge)}, bitwise={int(cfg.bitwise)}"
         )
 
-        scen_cfg = _load_config_yaml_or_json(PROJECT_ROOT / "config.yaml")
-        sampler = ScenarioSampler(config=scen_cfg, seed=cfg.base_seed)
+        sampler = ScenarioSampler(seed=int(cfg.base_seed))
+        scen_cfg = dict(getattr(sampler, "config", {}))
 
         device = torch.device(cfg.device)
 
@@ -411,6 +571,7 @@ def main() -> None:
         last_log = t0
 
         try:
+            last_save_ts = time.time()
             while trainer.iteration < cfg.iterations and not stop_flag["stop"]:
                 iter0 = time.time()
                 it = int(trainer.iteration)
@@ -424,14 +585,19 @@ def main() -> None:
 
                 # 1) ADV rollouts
                 tA0 = time.time()
-                per = max(1, int(cfg.traversals_per_player) // w)
-                rem = int(cfg.traversals_per_player) - per * w
+                # Divide exatamente o budget, sem forçar mínimo 1 por worker.
+                total_trav = int(cfg.traversals_per_player)
+                per = total_trav // w
+                rem = total_trav % w
 
                 adv_futures = {}
                 adv_keys = []
                 for p in range(3):
                     for k in range(w):
                         bud = per + (1 if k < rem else 0)
+                        if bud <= 0:
+                            continue
+
                         seed = int(cfg.base_seed) + 10_000_000 + it * 1000 + p * 100 + k
                         key = (p, k)
                         adv_keys.append(key)
@@ -448,9 +614,21 @@ def main() -> None:
                         adv_results[key] = fut.result()
                 except KeyboardInterrupt:
                     stop_flag["stop"] = True
-                    print("\n[WARN] Ctrl+C durante ADV collect. Cancelando futures e salvando estado consistente...")
-                    for f in adv_futures.keys():
-                        f.cancel()
+                    print("\n[WARN] Ctrl+C durante ADV collect. Cancelando futures e encerrando pool para salvar estado consistente...")
+
+                    # Cancela futures já submetidos (não bloqueia)
+                    try:
+                        for f in list(adv_futures.keys()):
+                            f.cancel()
+                    except Exception:
+                        pass
+
+                    # Encerra o pool imediatamente para evitar spam de KeyboardInterrupt nos workers
+                    try:
+                        pool.shutdown(wait=False, cancel_futures=True)
+                    except Exception:
+                        pass
+
                     # IMPORTANT: não faz merge parcial
                     raise
                 adv_added = [0, 0, 0]
@@ -484,13 +662,18 @@ def main() -> None:
 
                 # 3) POLICY rollouts
                 tC0 = time.time()
-                per_ep = max(1, int(cfg.policy_episodes) // w)
-                rem_ep = int(cfg.policy_episodes) - per_ep * w
+                
+                total_ep = int(cfg.policy_episodes)
+                per_ep = total_ep // w
+                rem_ep = total_ep % w
 
                 pol_futures = {}
                 pol_keys = []
                 for k in range(w):
                     ep = per_ep + (1 if k < rem_ep else 0)
+                    if ep <= 0:
+                        continue
+
                     seed = int(cfg.base_seed) + 20_000_000 + it * 1000 + k
                     key = (k,)
                     pol_keys.append(key)
@@ -507,9 +690,21 @@ def main() -> None:
                         pol_results[key] = fut.result()
                 except KeyboardInterrupt:
                     stop_flag["stop"] = True
-                    print("\n[WARN] Ctrl+C durante POL collect. Cancelando futures e salvando estado consistente...")
-                    for f in pol_futures.keys():
-                        f.cancel()
+                    print("\n[WARN] Ctrl+C durante POL collect. Cancelando futures e encerrando pool para salvar estado consistente...")
+
+                    # Cancela futures já submetidos (não bloqueia)
+                    try:
+                        for f in list(pol_futures.keys()):
+                            f.cancel()
+                    except Exception:
+                        pass
+
+                    # Encerra o pool imediatamente para evitar spam de KeyboardInterrupt nos workers
+                    try:
+                        pool.shutdown(wait=False, cancel_futures=True)
+                    except Exception:
+                        pass
+
                     # IMPORTANT: não faz merge parcial
                     raise
                 pol_added = [0, 0, 0]
@@ -521,6 +716,7 @@ def main() -> None:
                     out, counts = pol_results[key]
                     for p in range(3):
                         obs, legal, target, pid = out[p]
+                        target = _sanitize_policy_targets(legal, target)
                         pol_added[p] += _buffer_add_many(trainer.pol_buffers[p], obs, legal, target, pid)
                     for p in range(3):
                         for a in range(7):
@@ -543,6 +739,17 @@ def main() -> None:
 
 
                 trainer.iteration += 1
+
+                # B036: Warm-up correto
+                # Durante warm-up treinamos normalmente, mas quando termina, limpamos buffers
+                # para não contaminar o dataset "oficial" com dados do início aleatório.
+                if cfg.warmup_iters and trainer.iteration == cfg.warmup_iters:
+                    print(f"[INFO] Warm-up finalizado em iter={trainer.iteration}. Limpando buffers...")
+                    for p in range(3):
+                        trainer.adv_buffers[p].clear(reseed=int(cfg.base_seed) + 1000 + p)
+                        trainer.pol_buffers[p].clear(reseed=int(cfg.base_seed) + 2000 + p)
+                    print("[OK] Buffers limpos. A partir daqui o dataset é 'limpo'.")
+
                 dt_total = time.time() - iter0
 
                 adv_samples = sum(int(x) for x in adv_added)
@@ -560,6 +767,43 @@ def main() -> None:
                         f"adv_added={adv_added} pol_added={pol_added} "
                         f"adv_loss={[round(float(x), 4) for x in adv_losses]} pol_loss={round(float(pol_loss), 4)}"
                     )
+                    
+                    # Stats de escala do sinal, detecta saturação e NaN cedo
+                    adv_s = [_sample_adv_target_stats(trainer.adv_buffers[p], n=8192) for p in range(3)]
+                    pol_s = [_sample_pol_entropy(trainer.pol_buffers[p], n=8192) for p in range(3)]
+
+                    def _fmt_adv(i):
+                        s = adv_s[i]
+                        if not s:
+                            return "empty"
+                        return f"p50={s['abs_p50']:.3f} p95={s['abs_p95']:.3f} p99={s['abs_p99']:.3f} naninf={int(s['naninf'])}"
+
+                    def _fmt_pol(i):
+                        s = pol_s[i]
+                        if not s:
+                            return "empty"
+                        return f"mean={s['entropy_mean']:.3f} p05={s['entropy_p05']:.3f} p50={s['entropy_p50']:.3f} naninf={int(s['naninf'])}"
+
+                    print("adv_abs BB stats, p0: " + _fmt_adv(0) + " , p1: " + _fmt_adv(1) + " , p2: " + _fmt_adv(2))
+                    print("pol_entropy stats, p0: " + _fmt_pol(0) + " , p1: " + _fmt_pol(1) + " , p2: " + _fmt_pol(2))                  
+                    
+                    pol_sup = [_sample_policy_action_support(trainer.pol_buffers[p], n=8192) for p in range(3)]
+
+                    def _fmt_sup(i):
+                        s = pol_sup[i]
+                        if not s:
+                            return "empty"
+                        cl = s["count_legal"]
+                        mp = s["mean_prob"]
+                        parts = []
+                        for a in range(len(cl)):
+                            parts.append(f"a{a}: legal={cl[a]} mean={mp[a]:.4f}")
+                        return " | ".join(parts)
+
+                    print("pol_action_support p0: " + _fmt_sup(0))
+                    print("pol_action_support p1: " + _fmt_sup(1))
+                    print("pol_action_support p2: " + _fmt_sup(2))
+                    
                     print(
                         "actions p0: " + _fmt_action_dist(action_counts[0]) + " | "
                         "p1: " + _fmt_action_dist(action_counts[1]) + " | "
@@ -567,22 +811,42 @@ def main() -> None:
                     )
                     last_log = now
 
-                if trainer.iteration % cfg.save_every == 0:
-                    print("[INFO] Salvando checkpoint + buffers...")
-                    save_all(trainer, cfg)
-                    print("[OK] Salvo.")
+                do_save = False
+
+                # Compatibilidade: save por iteração, apenas se save_every > 0
+                if cfg.save_every and (trainer.iteration % cfg.save_every == 0):
+                    do_save = True
+
+                # B019: save por tempo (default 8h)
+                now_ts = time.time()
+                if cfg.save_every_seconds and (now_ts - last_save_ts) >= float(cfg.save_every_seconds):
+                    do_save = True
+
+                if do_save:
+                    if cfg.skip_saves_during_warmup and (trainer.iteration < cfg.warmup_iters):
+                        pass
+                    else:
+                        print("[INFO] Salvando checkpoint + buffers...")
+                        save_all(trainer, cfg)
+                        print("[OK] Salvo.")
+                        last_save_ts = now_ts
 
         except KeyboardInterrupt:
             stop_flag["stop"] = True
             print("\n[INFO] Interrompido pelo usuário (CTRL+C). Salvando estado consistente...")
         finally:
+            # B037: encerra workers antes de salvar para evitar spam de KeyboardInterrupt nos processos
+            try:
+                pool.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+
             print("\nParando, salvando checkpoint + buffers...")
             try:
                 save_all(trainer, cfg)
                 print("[OK] Salvo. Saindo.")
             except Exception as _e:
                 print(f"[WARN] Falha ao salvar checkpoint/buffers: {_e}")
-            pool.shutdown(wait=True, cancel_futures=True)
 
 
 if __name__ == "__main__":

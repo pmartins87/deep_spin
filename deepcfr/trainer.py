@@ -164,7 +164,13 @@ class DeepCFRTrainer:
         )
 
         for _ in range(budget):
-            ep_seed = self.base_game_seed + (self.iteration * 10_000) + int(self.rng.integers(0, 1_000_000))
+            # ep_seed determinístico e único por (iter, traverser, idx)
+            ep_seed = (
+                int(self.base_game_seed)
+                + int(self.iteration) * 10_000_000
+                + int(traverser_id) * 1_000_000
+                + int(_)
+            )
             spec = self._sample_episode_spec(ep_seed)
             traverser.traverse(spec, traverser=traverser_id, history_actions=[])
 
@@ -215,7 +221,12 @@ class DeepCFRTrainer:
         replayer = Replayer(self.cpoker, base_game_seed=self.base_game_seed)
 
         for _ in range(episodes):
-            ep_seed = self.base_game_seed + (self.iteration * 10_000) + int(self.rng.integers(0, 1_000_000))
+            # ep_seed determinístico e único por (iter, idx)
+            ep_seed = (
+                int(self.base_game_seed)
+                + int(self.iteration) * 10_000_000
+                + int(_)
+            )
             spec = self._sample_episode_spec(ep_seed)
             g = replayer.make_game(spec)
 
@@ -223,7 +234,9 @@ class DeepCFRTrainer:
                 p = int(g.get_game_pointer())
                 state = g.get_state(p)
 
-                pid = int(state.get("current_player", -1))
+                # Em alguns builds do env, "current_player" pode não existir.
+                # O game_pointer já representa o jogador atual.
+                pid = int(state.get("current_player", p))
                 if pid < 0 or pid >= self.num_players:
                     break
 

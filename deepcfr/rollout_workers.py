@@ -191,7 +191,15 @@ def run_adv_task(task: AdvTask):
     )
 
     for _ in range(int(task.budget)):
-        ep_seed = int(G["base_game_seed"]) + (int(task.iteration) * 10_000) + int(rng.integers(0, 1_000_000))
+        # ep_seed determinístico e único por (iter, traverser_id, task.seed, idx_local)
+        # Evita colisões massivas quando budget é grande.
+        ep_seed = (
+            int(G["base_game_seed"])
+            + int(task.iteration) * 10_000_000
+            + int(task.traverser_id) * 1_000_000
+            + (int(task.seed) % 1_000_000)
+            + int(_)
+        )
         sc = sampler.sample()
         stacks = list(sc["stacks"])
         sb = int(sc["sb"])
@@ -231,7 +239,14 @@ def run_pol_task(task: PolTask):
     replayer = Replayer(cpoker, base_game_seed=int(G["base_game_seed"]))
 
     for _ in range(int(task.episodes)):
-        ep_seed = int(G["base_game_seed"]) + (int(task.iteration) * 10_000) + int(rng.integers(0, 1_000_000))
+        # ep_seed determinístico e único por (iter, task.seed, idx_local)
+        # Evita colisões em batches grandes de policy_episodes.
+        ep_seed = (
+            int(G["base_game_seed"])
+            + int(task.iteration) * 10_000_000
+            + (int(task.seed) % 1_000_000)
+            + int(_)
+        )
         sc = sampler.sample()
         stacks = list(sc["stacks"])
         sb = int(sc["sb"])

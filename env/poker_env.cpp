@@ -227,6 +227,7 @@ Round::Round(int num_players_, int init_raise_amount_, Dealer* dealer_)
       raised(num_players_, 0),
       game_pointer(0),
       to_act(0),
+      last_raise_size(init_raise_amount_),
       dealer(dealer_) {}
 
 void Round::start_new_round(const std::vector<Player>& players,
@@ -235,6 +236,7 @@ void Round::start_new_round(const std::vector<Player>& players,
     (void)players;
     game_pointer = game_pointer_;
     to_act = 0;
+	last_raise_size = init_raise_amount;
 
     if (raised_opt) {
         raised = *raised_opt;
@@ -293,10 +295,16 @@ std::vector<ActionType> Round::get_nolimit_legal_actions(const std::vector<Playe
     rm_if_unaffordable(ActionType::RAISE_HALF_POT, pot / 2);
     rm_if_unaffordable(ActionType::RAISE_33_POT, (pot * 33) / 100);
 
-    auto rm_if_too_small_to_raise = [&](ActionType a, int raise_add) {
-        if (raise_add <= 0) { rm(a); return; }
-        if (diff > 0 && raise_add <= diff) rm(a);
-    };
+	auto rm_if_too_small_to_raise = [&](ActionType a, int raise_add) {
+		if (raise_add <= 0) { rm(a); return; }
+
+		// B016: regra correta de min-raise no-limit.
+		// - Se não existe aposta ainda (mx==0), isso é um BET: mínimo = init_raise_amount (BB).
+		// - Se existe aposta, mínimo = last_raise_size (tamanho do último raise válido).
+		const int min_raise = (mx == 0) ? init_raise_amount : last_raise_size;
+
+		if (raise_add < min_raise) rm(a);
+	};
 
     if (std::find(legal.begin(), legal.end(), ActionType::RAISE_POT) != legal.end()) {
         rm_if_too_small_to_raise(ActionType::RAISE_POT, pot);
@@ -324,9 +332,12 @@ std::vector<ActionType> Round::get_nolimit_legal_actions(const std::vector<Playe
         if (effective_stack <= 0) return false;
         int qq = total_put;
         if (qq > p.remained_chips) qq = p.remained_chips;
-        const int ninety = static_cast<int>(std::ceil(0.90f * effective_stack));
-        const int ten = static_cast<int>(std::floor(0.10f * effective_stack));
-        return (qq >= ninety) || ((effective_stack - qq) <= ten);
+		// B018: near-all-in collapse em 60% (remove raises que comprometem grande parte do stack)
+		// Motivo: evita linhas "quase shove" que criam ramificações artificiais e ruins como abstração.
+		const float kAllInThreshold = 0.60f;
+		const int thresh = static_cast<int>(std::ceil(kAllInThreshold * effective_stack));
+		const int leftover = static_cast<int>(std::floor((1.0f - kAllInThreshold) * effective_stack));
+		return (qq >= thresh) || ((effective_stack - qq) <= leftover);
     };
 
     if (std::find(legal.begin(), legal.end(), ActionType::ALL_IN) != legal.end()) {
@@ -379,11 +390,18 @@ int Round::proceed_round(std::vector<Player>& players, int action_int) {
     if (action == ActionType::CHECK_CALL) {
         do_put(diff);
         to_act += 1;
-    } else if (action == ActionType::ALL_IN) {
-        const int want = p.remained_chips;
-        const int pay = do_put(want);
-        if (pay > diff) to_act = 1;
-        else to_act += 1;
+	} else if (action == ActionType::ALL_IN) {
+		const int want = p.remained_chips;
+		const int pay = do_put(want);
+
+		if (pay > diff) {
+			// ALL-IN que aumenta o level de aposta conta como raise.
+			const int raise_size = pay - diff;
+			if (raise_size > 0) last_raise_size = raise_size;
+			to_act = 1;
+		} else {
+			to_act += 1;
+		}
     } else if (action == ActionType::RAISE_POT ||
                action == ActionType::RAISE_75_POT ||
                action == ActionType::RAISE_HALF_POT ||
@@ -395,11 +413,16 @@ int Round::proceed_round(std::vector<Player>& players, int action_int) {
         else if (action == ActionType::RAISE_HALF_POT) raise_add = pot / 2;
         else if (action == ActionType::RAISE_33_POT) raise_add = (pot * 33) / 100;
 
-        const int want = diff + raise_add;
-        const int pay = do_put(want);
+	const int want = diff + raise_add;
+	const int pay = do_put(want);
 
-        if (pay > diff) to_act = 1;
-        else to_act += 1;
+	if (pay > diff) {
+		const int raise_size = pay - diff;
+		if (raise_size > 0) last_raise_size = raise_size;
+		to_act = 1;
+	} else {
+		to_act += 1;
+	}
 
     } else if (action == ActionType::FOLD) {
         p.status = PlayerStatus::FOLDED;
@@ -2191,14 +2214,28 @@ bool PokerGame::is_over() const {
     }
     if (not_folded <= 1) return true;
 
-    bool any_can_act = false;
-    for (const auto& p : players_) {
-        if (p.status != PlayerStatus::FOLDED && p.status != PlayerStatus::ALLIN) {
-            any_can_act = true;
-            break;
-        }
-    }
-    if (!any_can_act) return true;
+	bool any_can_act = false;
+	for (const auto& p : players_) {
+		if (p.status != PlayerStatus::FOLDED && p.status != PlayerStatus::ALLIN) {
+			any_can_act = true;
+			break;
+		}
+	}
+
+	// Se ninguém pode agir, isso normalmente significa ALL-IN(s) -> precisamos runout do board
+	// para que o showdown seja calculado corretamente (5 cartas comunitárias).
+	if (!any_can_act) {
+		// is_over() é const, mas precisamos completar o board e fechar a mão com segurança.
+		PokerGame* self = const_cast<PokerGame*>(this);
+
+		if (self->public_cards_.size() < 5) {
+			while (self->public_cards_.size() < 5) {
+				self->public_cards_.push_back(self->dealer_.deal_card());
+			}
+		}
+		self->round_counter_ = 4; // garante terminal “de verdade”
+		return true;
+	}
 
     return false;
 }
@@ -2581,9 +2618,26 @@ std::vector<ActionType> PokerGame::get_legal_actions(int player_id) const {
             else if (v > second_mx) { second_mx = v; }
             if (i == player_id) my_chips = v;
         }
+		
         const int to_call_chips = std::max(0, mx_chips - my_chips);
         const int stack_chips = players_[player_id].remained_chips;
-        const int min_raise_to = mx_chips + (mx_chips - second_mx);
+        const int min_raise_to = mx_chips + (mx_chips - second_mx);	
+		
+		// B020: No pré-flop, se to_call == 0, FOLD não é uma ação legal (não existe "fold de graça").
+		// Ex.: BB após limps, pode checkar, não pode foldar.
+		if (to_call_chips == 0) {
+		legal.erase(std::remove(legal.begin(), legal.end(), ActionType::FOLD), legal.end());
+		}
+		
+		// B017: Raise vs isolation é sempre ALL-IN.
+		// Se o herói deu limp e agora enfrenta um iso-raise, removemos raises não all-in.
+		if (d.got_isolated && d.num_raises == 1) {
+			legal.erase(std::remove(legal.begin(), legal.end(), ActionType::RAISE_33_POT), legal.end());
+			legal.erase(std::remove(legal.begin(), legal.end(), ActionType::RAISE_HALF_POT), legal.end());
+			legal.erase(std::remove(legal.begin(), legal.end(), ActionType::RAISE_75_POT), legal.end());
+			legal.erase(std::remove(legal.begin(), legal.end(), ActionType::RAISE_POT), legal.end());
+			// mantém FOLD, CHECK_CALL (call do iso) e ALL_IN (raise permitido)
+		}
 
         if (to_call_chips > 0 && to_call_chips >= stack_chips) {
             legal.erase(std::remove(legal.begin(), legal.end(), ActionType::RAISE_33_POT), legal.end());
@@ -3046,9 +3100,11 @@ PYBIND11_MODULE(cpoker, m) {
              py::arg("stacks"), py::arg("dealer_id"), py::arg("small_blind"), py::arg("big_blind"))
         .def("step", &PokerGame::step, py::arg("action"))
         .def("get_legal_actions", &PokerGame::get_legal_actions, py::arg("player_id"))
-        .def("get_state", &PokerGame::get_state, py::arg("player_id"))
-        .def("get_payoffs", &PokerGame::get_payoffs)
-        .def("is_over", &PokerGame::is_over)
+		.def("get_state", &PokerGame::get_state, py::arg("player_id"))
+		.def("set_debug_raw_obs", &PokerGame::set_debug_raw_obs, py::arg("v"))
+		.def("get_debug_raw_obs", &PokerGame::get_debug_raw_obs)
+		.def("get_payoffs", &PokerGame::get_payoffs)
+		.def("is_over", &PokerGame::is_over)
         .def("get_player_id", &PokerGame::get_player_id)
         .def("get_game_pointer", &PokerGame::get_game_pointer)
         .def("clone", &PokerGame::clone);

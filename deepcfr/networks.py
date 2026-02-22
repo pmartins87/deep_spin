@@ -78,6 +78,5 @@ class PolicyNet(nn.Module):
         probs = PolicyNet.masked_softmax(logits, legal)
         # evita log(0)
         probs = probs.clamp_min(1e-12)
-        loss = -(target_probs * probs.log())
-        denom = legal.sum(dim=-1).clamp_min(1.0)
-        return (loss.sum(dim=-1) / denom).mean()
+        loss = -(target_probs * probs.log()).sum(dim=-1)
+        return loss.mean()

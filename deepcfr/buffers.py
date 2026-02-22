@@ -15,7 +15,9 @@ class ReservoirBuffer:
     Reservoir sampling buffer com:
       - add() item-a-item
       - add_batch() rápido quando ainda não encheu (cópia blocada)
-      - save() atômico (evita checkpoint corrompido em queda de energia)
+      - sample_batch() para treino
+      - save()/load() atômico
+      - clear() para warm-up (B036)
     """
     VERSION = 2
 
@@ -35,6 +37,17 @@ class ReservoirBuffer:
 
         self.n_seen = 0
         self.size = 0
+
+    def clear(self, reseed: int | None = None):
+        """
+        B036: limpa o buffer mantendo a alocação (rápido).
+        - reseta size/n_seen
+        - opcionalmente reseed do RNG para reprodutibilidade após warm-up
+        """
+        self.n_seen = 0
+        self.size = 0
+        if reseed is not None:
+            self.rng = np.random.default_rng(int(reseed))
 
     def add(self, obs: np.ndarray, legal_mask: np.ndarray, target: np.ndarray, player_id: int):
         obs = np.asarray(obs, dtype=self.dtype)
@@ -67,7 +80,7 @@ class ReservoirBuffer:
     def add_batch(self, obs: np.ndarray, legal: np.ndarray, target: np.ndarray, player_id: np.ndarray):
         """
         Fast path:
-          - Enquanto o buffer ainda não encheu, copia blocos inteiros (muito mais rápido).
+          - Enquanto o buffer ainda não encheu, copia blocos inteiros.
           - Depois que encheu, cai no add() item-a-item (reservoir sampling).
         """
         obs = np.asarray(obs, dtype=self.dtype)

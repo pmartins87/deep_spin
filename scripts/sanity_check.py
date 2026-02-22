@@ -174,19 +174,20 @@ def main() -> int:
             g.set_seed(int(args.seed) + ep)
         g.reset(stacks, dealer_id, int(sb), int(bb))
 
+        # Necessário: raw_obs só é incluído se debug_raw_obs estiver ativo no C++ env.
+        if hasattr(g, "set_debug_raw_obs"):
+            g.set_debug_raw_obs(True)
+
         while not g.is_over():
             pid = int(g.get_player_id())
             st: Dict[str, Any] = g.get_state(pid)
 
-            obs = np.asarray(st["obs"], dtype=np.float32)
-
-            # Layout (C++): bets por player em bb ficam nessa fatia.
-            # Mantemos isso porque raw_obs não expõe round_.raised diretamente.
-            bets_bb = obs[107:110]
-            bets_chips = np.rint(bets_bb * float(bb)).astype(np.int64)
-            diff = int(bets_chips.max() - bets_chips[pid])
-
+            # raw_obs é a fonte correta para diff/pot/stacks
             raw = st["raw_obs"]
+
+            in_chips = list(map(int, raw["in_chips"]))
+            diff = int(max(in_chips) - in_chips[pid])
+
             remained = int(raw["remained_chips"][pid])
             pot = int(raw["pot"])
             stage = int(raw.get("stage", -1))

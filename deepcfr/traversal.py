@@ -73,7 +73,7 @@ def sample_action(rng: np.random.Generator, sigma: np.ndarray, raw_legal_actions
 class EpisodeSpec:
     __slots__ = ("ep_seed", "stacks", "dealer_id", "sb", "bb", "game_is_hu")
 
-    def __init__(self, ep_seed: int, stacks: List[int], dealer_id: int, sb: int, bb: int, game_is_hu: bool = False):
+    def __init__(self, ep_seed: int, stacks: list[int], dealer_id: int, sb: int, bb: int, game_is_hu: bool = False):
         self.ep_seed = int(ep_seed)
         self.stacks = list(map(int, stacks))
         self.dealer_id = int(dealer_id)
@@ -218,7 +218,7 @@ class ExternalSamplingTraverser:
             raise RuntimeError("run_episode requires traverser_id to be set in the constructor.")
         if ep_seed is None:
             ep_seed = int(self.rng.integers(0, 2**31 - 1))
-        spec = EpisodeSpec(ep_seed=int(ep_seed), stacks=list(stacks), dealer_id=int(dealer_id), sb=int(sb), bb=int(bb), is_hu=bool(is_hu))
+        spec = EpisodeSpec(ep_seed=int(ep_seed), stacks=list(stacks), dealer_id=int(dealer_id), sb=int(sb), bb=int(bb), game_is_hu=bool(is_hu))
         return self.traverse(spec, traverser=self.traverser_id, history_actions=[])
 
     # ---------------------------
