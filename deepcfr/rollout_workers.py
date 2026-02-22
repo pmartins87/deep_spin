@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import random
 from dataclasses import dataclass
 from typing import Any
 
@@ -50,6 +51,13 @@ def init_worker(
     except Exception:
         pass
 
+    # Determinismo no worker (evita variação se alguma op do torch for usada no caminho)
+    if os.environ.get("SPIN_DETERMINISTIC_WORKERS", "0") == "1":
+        try:
+            torch.use_deterministic_algorithms(True)
+        except Exception:
+            pass
+
     import cpoker
     from deepcfr.networks import AdvantageNet
     from deepcfr.scenario import ScenarioSampler, choose_dealer_id_for_episode
@@ -77,7 +85,7 @@ def init_worker(
     G["legal_mask_from_state"] = legal_mask_from_state
     G["sample_action"] = sample_action
 
-    G["rng"] = np.random.default_rng(int(worker_seed))
+    G["rng"] = np.random.default_rng(int(worker_seed))  
     G["device"] = torch.device("cpu")
 
     # Caches por worker
@@ -163,6 +171,15 @@ class PolTask:
 
 
 def run_adv_task(task: AdvTask):
+    # Seed forte por task: cobre random, np.random legacy e torch
+    s = int(task.seed)
+    random.seed(s)
+    np.random.seed(s & 0xFFFFFFFF)
+    try:
+        G["torch"].manual_seed(s)
+    except Exception:
+        pass
+
     torch = G["torch"]
     ExternalSamplingTraverser = G["ExternalSamplingTraverser"]
     EpisodeSpec = G["EpisodeSpec"]
@@ -217,6 +234,15 @@ def run_adv_task(task: AdvTask):
 
 
 def run_pol_task(task: PolTask):
+    # Seed forte por task: cobre random, np.random legacy e torch
+    s = int(task.seed)
+    random.seed(s)
+    np.random.seed(s & 0xFFFFFFFF)
+    try:
+        G["torch"].manual_seed(s)
+    except Exception:
+        pass
+
     torch = G["torch"]
     Replayer = G["Replayer"]
     EpisodeSpec = G["EpisodeSpec"]
@@ -260,13 +286,18 @@ def run_pol_task(task: PolTask):
         g = replayer.make_game(spec)
 
         while not g.is_over():
-            p = int(g.get_game_pointer())
-            state = g.get_state(p)
+            gp = int(g.get_game_pointer())
+            state = g.get_state(gp)
 
-            pid = int(p)  # current player is game pointer
+            # CORRETO: quem age vem do estado, não do ponteiro
+            pid = int(
+                state.get("current_player",
+                state.get("player_id",
+                state.get("pid", -1)))
+            )
             if pid < 0 or pid >= 3:
                 break
-
+        
             raw_legal = state.get("raw_legal_actions", [])
             if not raw_legal:
                 break

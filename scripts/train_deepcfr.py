@@ -109,6 +109,11 @@ def _torch_save_atomic(torch, obj, path: Path) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save(obj, tmp)
     os.replace(tmp, path)
+    
+def _fixed_base_game_seed(cfg: TrainCfg) -> int:
+    # Seed estável entre execuções e resumes.
+    # (Qualquer fórmula determinística serve, desde que não dependa de PID/tempo.)
+    return int(cfg.base_seed) ^ 0x9E3779B1
 
 
 @dataclass
@@ -169,6 +174,9 @@ class TrainCfg:
     def weights_pol_path(self) -> Path:
         return self.ckpt_dir / "weights_pol.pt"
 
+    @property
+    def rng_path(self) -> Path:
+        return self.ckpt_dir / "rng_state.json"
 
 def save_all(trainer, cfg: TrainCfg) -> None:
     cfg.ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -179,6 +187,32 @@ def save_all(trainer, cfg: TrainCfg) -> None:
     for p in range(3):
         trainer.adv_buffers[p].save(str(cfg.buffers_dir / f"adv_p{p}"))
         trainer.pol_buffers[p].save(str(cfg.buffers_dir / f"pol_p{p}"))
+
+    # --- SALVA RNG STATES (determinismo no resume) ---
+    import numpy as np
+    import torch
+    import random
+
+    # --- SALVA RNG STATES sem pickle (compatível com torch 2.6+) ---
+    import base64
+
+    torch_bytes = torch.get_rng_state().cpu().numpy().tobytes()
+    rng_state = {
+        "torch_rng_state_b64": base64.b64encode(torch_bytes).decode("ascii"),
+        "numpy_global_state": list(np.random.get_state()),  # (str, ndarray, int, int, float)
+        "python_random_state": list(random.getstate()),
+    }
+
+    # numpy_global_state[1] é ndarray, precisa virar lista
+    if isinstance(rng_state["numpy_global_state"][1], np.ndarray):
+        rng_state["numpy_global_state"][1] = rng_state["numpy_global_state"][1].tolist()
+
+    # salva atômico
+    cfg.rng_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cfg.rng_path.with_suffix(cfg.rng_path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(rng_state, f)
+    os.replace(tmp, cfg.rng_path)
 
 
 def try_restore_all(trainer, cfg: TrainCfg) -> None:
@@ -207,6 +241,44 @@ def try_restore_all(trainer, cfg: TrainCfg) -> None:
         except Exception as e:
             rotate_incompatible_folder(cfg.buffers_dir, "buffers_restore_failed")
             print(f"[WARN] Restore dos buffers falhou: {type(e).__name__}: {e}, buffers resetados.")
+
+    # --- RESTAURA RNG STATES sem torch.load (compatível com torch 2.6+) ---
+    if cfg.rng_path.exists():
+        try:
+            import numpy as np
+            import torch
+            import random
+            import base64
+
+            with open(cfg.rng_path, "r", encoding="utf-8") as f:
+                st = json.load(f)
+
+            # torch rng
+            b = base64.b64decode(st["torch_rng_state_b64"].encode("ascii"))
+            torch_state = np.frombuffer(b, dtype=np.uint8).copy()
+            torch.set_rng_state(torch.from_numpy(torch_state))
+
+            # numpy global
+            ng = st["numpy_global_state"]
+            # reconstrói tuple: (str, ndarray, int, int, float)
+            ng0 = ng[0]
+            ng1 = np.asarray(ng[1], dtype=np.uint32)
+            ng2 = int(ng[2]); ng3 = int(ng[3]); ng4 = float(ng[4])
+            np.random.set_state((ng0, ng1, ng2, ng3, ng4))
+
+            # python random (JSON transforma tuplas em listas, então re-tuple recursivo)
+            def _to_tuple(x):
+                if isinstance(x, list):
+                    return tuple(_to_tuple(i) for i in x)
+                return x
+
+            pr = st["python_random_state"]
+            random.setstate(_to_tuple(pr))
+
+            print("[OK] RNG states restaurados.")
+        except Exception as e:
+            rotate_incompatible_path(cfg.rng_path, "rng_restore_failed")
+            print(f"[WARN] Restore do RNG falhou: {type(e).__name__}: {e}")
 
 def _sanitize_policy_targets(legal: "np.ndarray", target: "np.ndarray") -> "np.ndarray":
     """
@@ -461,6 +533,13 @@ def main() -> None:
 
         _set_threads_env(cfg.main_torch_threads)
         import torch
+        import numpy as np
+        import random
+
+        # Seeds globais (tem que acontecer antes de qualquer treino/amostragem)
+        random.seed(int(cfg.base_seed))
+        np.random.seed(int(cfg.base_seed))
+        torch.manual_seed(int(cfg.base_seed))
 
         torch.set_num_threads(max(1, int(cfg.main_torch_threads)))
         try:
@@ -542,6 +621,12 @@ def main() -> None:
 
         try_restore_all(trainer, cfg)
 
+        # Força estabilidade total: nunca depender de base_game_seed interno do trainer
+        try:
+            trainer.base_game_seed = int(cfg.base_seed)
+        except Exception:
+            pass
+
         stop_flag = {"stop": False}
 
         def _sigint(_sig, _frm):
@@ -551,6 +636,15 @@ def main() -> None:
             signal.signal(signal.SIGINT, _sigint)
         except Exception:
             pass
+            
+        # Determinismo forte no resume: não usar PID no seed do worker
+        os.environ["SPIN_DETERMINISTIC_WORKERS"] = "1"
+
+        # Base seed do jogo TEM que ser estável para resume bit-a-bit.
+        fixed_bgs = _fixed_base_game_seed(cfg)
+
+        # Força também no trainer (afeta Replayer e Traverser no processo principal)
+        trainer.base_game_seed = int(fixed_bgs)
 
         pool = ProcessPoolExecutor(
             max_workers=int(cfg.rollout_workers),
@@ -559,7 +653,7 @@ def main() -> None:
                 str(PROJECT_ROOT),
                 str(ENV_DIR),
                 int(obs_dim),
-                int(trainer.base_game_seed),
+                int(cfg.base_seed),  # FIXO e estável entre execuções
                 dict(scen_cfg),
                 int(cfg.worker_threads),
                 int(cfg.base_seed ^ 0x123456),
